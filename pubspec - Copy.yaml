@@ -1,0 +1,26 @@
+name: demo_android
+description: Demo móvil para gestión de préstamos
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dio: ^5.5.0
+  flutter_riverpod: ^2.5.1
+  go_router: ^14.2.0
+
+dependencies:
+  dio: ^5.9.0
+  flutter_riverpod: ^2.6.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
