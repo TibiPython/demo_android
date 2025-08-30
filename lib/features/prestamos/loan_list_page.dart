@@ -1,10 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'loan_service.dart';
 import 'loan_model.dart';
-import 'loan_new_page.dart';
-import 'loan_detail_page.dart';
 
 final _codCliProvider = StateProvider<String>((ref) => '');
 final _prestamosFutureProvider = FutureProvider.autoDispose<PrestamosResp>((ref) async {
@@ -24,7 +23,11 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
   Timer? _debouncer;
 
   @override
-  void dispose() { _debouncer?.cancel(); _codCtrl.dispose(); super.dispose(); }
+  void dispose() {
+    _debouncer?.cancel();
+    _codCtrl.dispose();
+    super.dispose();
+  }
 
   void _onCodChanged(String v) {
     _debouncer?.cancel();
@@ -33,10 +36,8 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
     });
   }
 
-  Future<void> _openDetalle(PrestamoItem it) async {
-    final p = await ref.read(prestamosServiceProvider).obtenerPorId(it.id);
-    if (!mounted) return;
-    Navigator.push(context, MaterialPageRoute(builder: (_) => LoanDetailPage(prestamo: p)));
+  void _openDetalle(PrestamoItem it) {
+    context.push('/prestamos/${it.id}'); // 👈 GoRouter al detalle por id
   }
 
   @override
@@ -46,7 +47,7 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('Préstamos')),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LoanNewPage())),
+        onPressed: () => context.push('/prestamos/nuevo'), // 👈 GoRouter al “Nuevo”
         child: const Icon(Icons.add),
       ),
       body: Column(
@@ -76,7 +77,10 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
                     final nom = it.cliente['nombre'] ?? '';
                     return ListTile(
                       title: Text('#${it.id} — $cod — $nom'),
-                      subtitle: Text('Monto: ${it.monto} | ${it.modalidad} | Inicio: ${it.fechaInicio.toString().substring(0,10)} | Cuotas: ${it.numCuotas} | Tasa: ${it.tasaInteres}%'),
+                      subtitle: Text(
+                        'Monto: ${it.monto} | ${it.fechaInicio.toString().substring(0,10)} | '
+                        'Cuotas: ${it.numCuotas} | Tasa: ${it.tasaInteres}%',
+                      ),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () => _openDetalle(it),
                     );

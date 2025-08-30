@@ -15,6 +15,7 @@ class PrestamosListPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Scaffold(
+      appBar: AppBar(title: const Text('Préstamos')),
       body: FutureBuilder<List<Map<String, dynamic>>>(
         future: _fetch(ref),
         builder: (context, snap) {
@@ -25,19 +26,19 @@ class PrestamosListPage extends ConsumerWidget {
             return Center(child: Text('Error: ${snap.error}'));
           }
           final items = snap.data ?? const [];
-          if (items.isEmpty) {
-            return const Center(child: Text('Sin préstamos'));
-          }
+          if (items.isEmpty) return const Center(child: Text('Sin préstamos'));
+
           return ListView.separated(
             itemCount: items.length,
             separatorBuilder: (_, __) => const Divider(height: 1),
             itemBuilder: (_, i) {
               final p = items[i];
+              final id = p['id'] as int;
               final cliente = p['cliente'] as Map?;
-              final clienteNom = cliente?['nombre'] ?? '(sin cliente)';
-              final id = p['id'];
+              final clienteNom = (cliente?['nombre'] ?? '(sin cliente)').toString();
               final monto = p['monto'];
               final cuotas = p['num_cuotas'];
+
               return ListTile(
                 leading: const Icon(Icons.request_page),
                 title: Text(clienteNom),
@@ -50,7 +51,7 @@ class PrestamosListPage extends ConsumerWidget {
         },
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => context.push('/prestamos/nuevo'),
+        onPressed: () => context.push('/prestamos/nuevo'), // 👈 GoRouter
         child: const Icon(Icons.add),
       ),
     );

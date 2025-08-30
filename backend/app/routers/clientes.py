@@ -1,165 +1,160 @@
-﻿from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field, constr
-from typing import Optional, List, Dict, Any
-from fastapi import Response
-import sqlite3
+﻿from fastapi import APIRouter, HTTPException, Path
+from pydantic import BaseModel, EmailStr, field_validator
+from pydantic.types import StringConstraints
+from typing import Optional, List, Any, Annotated
 from app.deps import get_conn
 
 router = APIRouter()
 
-# ======== MODELOS ========
-NombreStr = constr(strip_whitespace=True, pattern=r"^[A-Za-zÃÃ‰ÃÃ“ÃšÃ¡Ã©Ã­Ã³ÃºÃ‘Ã± ]+$")
-TelefonoStr = constr(strip_whitespace=True, pattern=r"^\d+$", min_length=7, max_length=15)
+# ---------- Tipos con validación (Pydantic v2) ----------
+NombreStr     = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
+CodigoStr     = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{1,10}$")]        # '003', '15', etc.
+TelefonoStr   = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\+?\d{6,15}$")]     # solo dígitos (+ opcional)
+IdentStr      = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=30)]
+DireccionStr  = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=120)]
 
 class ClienteIn(BaseModel):
-    nombre: NombreStr = Field(..., description="Solo letras y espacios, con tildes.")
-    telefono: TelefonoStr = Field(..., description="Solo dÃ­gitos, 7 a 15 caracteres.")
+    # Si el backend autogenera 'codigo', lo dejamos opcional; si te llega, validamos pero NO lo usaremos al insertar.
+    codigo: Optional[CodigoStr] = None
+    nombre: NombreStr
+    identificacion: Optional[IdentStr] = None
+    direccion: Optional[DireccionStr] = None
+    telefono: Optional[TelefonoStr] = None
+    email: Optional[EmailStr] = None
 
-class ClienteOut(BaseModel):
-    id: int
-    codigo: str
-    nombre: str
-    telefono: str
+    @field_validator("*", mode="before")
+    @classmethod
+    def empty_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
-class ClientesResp(BaseModel):
-    total: int
-    items: List[ClienteOut]
+class ClienteUpdate(BaseModel):
+    # PUT parcial: solo actualiza lo que venga no vacío
+    nombre: Optional[NombreStr] = None
+    identificacion: Optional[IdentStr] = None
+    direccion: Optional[DireccionStr] = None
+    telefono: Optional[TelefonoStr] = None
+    email: Optional[EmailStr] = None
 
-# ======== HELPERS ========
-def _row_to_cliente(row: sqlite3.Row) -> Dict[str, Any]:
-    return {
-        "id": row["id"],
-        "codigo": row["codigo"],
-        "nombre": row["nombre"],
-        "telefono": row["telefono"],
-    }
+    @field_validator("*", mode="before")
+    @classmethod
+    def empty_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
-def _generar_codigo(conn: sqlite3.Connection) -> str:
-    cur = conn.execute(
-        "SELECT MAX(CASE WHEN codigo GLOB '[0-9][0-9][0-9]' THEN CAST(codigo AS INTEGER) END) AS maxcod FROM clientes;"
-    )
-    row = cur.fetchone()
-    maxcod = row["maxcod"] if row and row["maxcod"] is not None else 0
-    return f"{int(maxcod) + 1:03d}"
+# ---------- util ----------
+def _table_exists(conn, name: str) -> bool:
+    r = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
+        (name,)
+    ).fetchone()
+    return r is not None
 
-# ======== ENDPOINTS ========
-@router.get("", response_model=ClientesResp)
-def listar_clientes(
-    buscar: Optional[str] = Query(None, description="CÃ³digo, nombre o telÃ©fono"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-):
-    offset = (page - 1) * page_size
-    with get_conn() as conn:
-        if buscar:
-            like = f"%{buscar.strip()}%"
-            total = conn.execute(
-                "SELECT COUNT(*) AS c FROM clientes WHERE codigo LIKE ? OR nombre LIKE ? OR telefono LIKE ?;",
-                (like, like, like)
-            ).fetchone()["c"]
-            rows = conn.execute(
-                "SELECT id,codigo,nombre,telefono FROM clientes "
-                "WHERE codigo LIKE ? OR nombre LIKE ? OR telefono LIKE ? "
-                "ORDER BY codigo ASC LIMIT ? OFFSET ?;",
-                (like, like, like, page_size, offset)
-            ).fetchall()
-        else:
-            total = conn.execute("SELECT COUNT(*) AS c FROM clientes;").fetchone()["c"]
-            rows = conn.execute(
-                "SELECT id,codigo,nombre,telefono FROM clientes "
-                "ORDER BY codigo ASC LIMIT ? OFFSET ?;",
-                (page_size, offset)
-            ).fetchall()
 
-    items = [_row_to_cliente(r) for r in rows]
-    return {"total": total, "items": items}
-
-@router.get("/{id}", response_model=ClienteOut)
-def obtener_cliente(id: int):
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT id,codigo,nombre,telefono FROM clientes WHERE id=?;",
-            (id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Cliente no encontrado")
-        return _row_to_cliente(row)
-
-@router.post("", response_model=ClienteOut, status_code=201)
-def crear_cliente(data: ClienteIn):
-    with get_conn() as conn:
-        nuevo_codigo = _generar_codigo(conn)
-        dup = conn.execute("SELECT 1 FROM clientes WHERE codigo=?;", (nuevo_codigo,)).fetchone()
-        if dup:
-            raise HTTPException(status_code=409, detail="CÃ³digo de cliente ya existe (intente nuevamente).")
-
-        cur = conn.execute(
-            "INSERT INTO clientes (codigo, nombre, telefono) VALUES (?, ?, ?);",
-            (nuevo_codigo, data.nombre.strip(), data.telefono.strip())
-        )
-        new_id = cur.lastrowid
-        row = conn.execute("SELECT id,codigo,nombre,telefono FROM clientes WHERE id=?;", (new_id,)).fetchone()
-        return _row_to_cliente(row)
-
-@router.put("/{id}", response_model=ClienteOut)
-def actualizar_cliente(id: int, data: ClienteIn):
-    with get_conn() as conn:
-        existe = conn.execute("SELECT 1 FROM clientes WHERE id=?;", (id,)).fetchone()
-        if not existe:
-            raise HTTPException(status_code=404, detail="Cliente no encontrado")
-
-        conn.execute(
-            "UPDATE clientes SET nombre=?, telefono=? WHERE id=?;",
-            (data.nombre.strip(), data.telefono.strip(), id)
-        )
-        row = conn.execute("SELECT id,codigo,nombre,telefono FROM clientes WHERE id=?;", (id,)).fetchone()
-        return _row_to_cliente(row)
-# --- utilidades para introspecciÃ³n del esquema (evita romper por nombres distintos) ---
-def _cols(conn: sqlite3.Connection, table: str):
+def _cols(conn, table: str) -> List[str]:
     return [r["name"] for r in conn.execute(f"PRAGMA table_info({table});").fetchall()]
 
-def _pick(colnames, candidates):
-    s = set(colnames)
-    for c in candidates:
-        if c in s:
-            return c
-    return None
-@router.delete("/{id}", status_code=204)
-def eliminar_cliente(id: int):
+
+def _generar_siguiente_codigo(conn) -> str:
+    """Calcula el siguiente 'codigo' consecutivo con padding de ceros.
+    Usa el ancho máximo existente (mínimo 3). Ej.: 001, 002, ..., 010.
+    """
+    row = conn.execute(
+        """
+        SELECT 
+            COALESCE(MAX(CAST(codigo AS INTEGER)), 0) AS max_num,
+            COALESCE(MAX(LENGTH(codigo)), 3)          AS width
+        FROM clientes;
+        """
+    ).fetchone()
+    max_num = int(row["max_num"]) if row and row["max_num"] is not None else 0
+    width   = int(row["width"])   if row and row["width"]   is not None else 3
+    if width < 3:
+        width = 3
+    return str(max_num + 1).zfill(width)
+
+# ---------- Endpoints ----------
+@router.get("")
+@router.get("/", include_in_schema=False)
+def listar_clientes():
     with get_conn() as conn:
-        cli = conn.execute("SELECT codigo FROM clientes WHERE id=?;", (id,)).fetchone()
-        if not cli:
+        if not _table_exists(conn, "clientes"):
+            return []
+        rows = conn.execute("SELECT * FROM clientes ORDER BY id ASC;").fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+@router.get("/{id:int}")
+def obtener_cliente(id: int = Path(..., ge=1)):
+    with get_conn() as conn:
+        if not _table_exists(conn, "clientes"):
+            raise HTTPException(status_code=404, detail="No existe tabla 'clientes'")
+        r = conn.execute("SELECT * FROM clientes WHERE id=?;", (id,)).fetchone()
+        if not r:
+            raise HTTPException(status_code=404, detail="Cliente no encontrado")
+        return {k: r[k] for k in r.keys()}
+
+@router.get("/{id:int}/detalle")
+def detalle_cliente(id: int = Path(..., ge=1)):
+    return obtener_cliente(id)
+
+@router.post("")
+def crear_cliente(payload: ClienteIn):
+    with get_conn() as conn:
+        if not _table_exists(conn, "clientes"):
+            raise HTTPException(status_code=404, detail="No existe tabla 'clientes'")
+        cols = _cols(conn, "clientes")
+
+        # === Generar 'codigo' consecutivo automáticamente si la columna existe ===
+        codigo_gen: Optional[str] = None
+        if "codigo" in cols:
+            codigo_gen = _generar_siguiente_codigo(conn)
+
+        # Campos tolerantes: solo insertamos columnas que existan
+        fields: List[str] = []
+        values: List[Any] = []
+        for k in ("codigo", "nombre", "identificacion", "direccion", "telefono", "email"):
+            if k in cols:
+                fields.append(k)
+                if k == "codigo" and codigo_gen is not None:
+                    # Ignoramos cualquier 'codigo' provisto por el cliente
+                    values.append(codigo_gen)
+                else:
+                    values.append(getattr(payload, k))
+
+        if not fields:
+            raise HTTPException(status_code=400, detail="No hay columnas válidas para insertar")
+
+        placeholders = ",".join(["?"] * len(fields))
+        sql = f"INSERT INTO clientes ({','.join(fields)}) VALUES ({placeholders});"
+        conn.execute(sql, tuple(values))
+        conn.commit()
+        new_id = conn.execute("SELECT last_insert_rowid() AS id;").fetchone()["id"]
+        r = conn.execute("SELECT * FROM clientes WHERE id=?;", (new_id,)).fetchone()
+        return {k: r[k] for k in r.keys()}
+
+@router.put("/{id:int}")
+def actualizar_cliente(id: int, payload: ClienteUpdate):
+    with get_conn() as conn:
+        if not _table_exists(conn, "clientes"):
+            raise HTTPException(status_code=404, detail="No existe tabla 'clientes'")
+        r0 = conn.execute("SELECT * FROM clientes WHERE id=?;", (id,)).fetchone()
+        if not r0:
             raise HTTPException(status_code=404, detail="Cliente no encontrado")
 
-        # Detectar columnas reales en 'prestamos' para verificar asociaciÃ³n
-        try:
-            prest_cols = _cols(conn, "prestamos")
-        except Exception:
-            prest_cols = []
+        cols = _cols(conn, "clientes")
+        sets: List[str] = []
+        vals: List[Any] = []
+        for k in ("nombre", "identificacion", "direccion", "telefono", "email"):
+            if getattr(payload, k) is not None and k in cols:
+                sets.append(f"{k}=?")
+                vals.append(getattr(payload, k))
+        if not sets:
+            return {k: r0[k] for k in r0.keys()}
 
-        fk_id_col = _pick(prest_cols, ["cliente_id", "id_cliente", "cliente"])
-        fk_cod_col = _pick(prest_cols, ["cod_cli", "codigo_cliente"])
-
-        # Construir consulta segura segÃºn columnas existentes
-        where_parts = []
-        params = []
-        if fk_id_col:
-            where_parts.append(f"{fk_id_col}=?")
-            params.append(id)
-        if fk_cod_col:
-            where_parts.append(f"{fk_cod_col}=?")
-            params.append(cli["codigo"])
-
-        count = 0
-        if where_parts:
-            q = f"SELECT COUNT(*) AS c FROM prestamos WHERE {' OR '.join(where_parts)};"
-            count = conn.execute(q, tuple(params)).fetchone()["c"]
-
-        if count > 0:
-            raise HTTPException(
-                status_code=409,
-                detail="Cliente tiene prÃ©stamos asociados. La eliminaciÃ³n completa se realizarÃ¡ en PASO 4 (operaciones protegidas)."
-            )
-
-        conn.execute("DELETE FROM clientes WHERE id=?;", (id,))
-        return Response(status_code=204)
+        vals.append(id)
+        conn.execute(f"UPDATE clientes SET {', '.join(sets)} WHERE id=?;", tuple(vals))
+        conn.commit()
+        r = conn.execute("SELECT * FROM clientes WHERE id=?;", (id,)).fetchone()
+        return {k: r[k] for k in r.keys()}

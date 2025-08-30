@@ -1,6 +1,7 @@
 // lib/features/prestamos/loan_new_page.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 
 import 'loan_service.dart';
 import 'loan_model.dart';
@@ -22,7 +23,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
   final _tasaCtrl = TextEditingController();
 
   DateTime? _fecha;
-  String _modalidad = 'MENSUAL';
+  String _modalidad = 'MENSUAL'; // se mantiene como usa la app
   bool _saving = false;
 
   @override
@@ -36,34 +37,23 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
 
   Future<void> _pickFecha() async {
     final now = DateTime.now();
-    final picked = await showDatePicker(
+    final d = await showDatePicker(
       context: context,
       initialDate: _fecha ?? now,
-      firstDate: DateTime(now.year - 5),
-      lastDate: DateTime(now.year + 5),
+      firstDate: DateTime(now.year - 2),
+      lastDate: DateTime(now.year + 3),
     );
-    if (picked != null) {
-      setState(() {
-        _fecha = picked;
-      });
-    }
+    if (d != null) setState(() => _fecha = d);
   }
 
-  String _fechaStr() {
-    if (_fecha == null) return 'Selecciona fecha';
-    // 'YYYY-MM-DD'
-    return _fecha!.toIso8601String().split('T').first;
-  }
-
-  Future<void> _guardar() async {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
     if (_fecha == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Selecciona la fecha de inicio')),
       );
       return;
     }
-
     try {
       setState(() => _saving = true);
 
@@ -86,7 +76,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
       final resp = await svc.crear(
         codCli: codCli,
         monto: monto,
-        modalidad: _modalidad.toUpperCase(), // 'MENSUAL' | 'QUINCENAL'
+        modalidad: _modalidad.toUpperCase(), // 'MENSUAL' | 'QUINCENAL' (como lo usa tu backend actual)
         fechaInicio: fechaInicio,
         numCuotas: numCuotas,
         tasaInteres: tasa,
@@ -96,7 +86,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
       final prestamo = Prestamo.fromJson(resp);
 
       if (!mounted) return;
-      // 🔧 Corrección aquí: LoanDetailPage espera 'id', NO 'prestamo'
+      // Navegar al detalle
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => LoanDetailPage(id: prestamo.id)),
@@ -104,7 +94,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error al crear préstamo: $e')),
+        SnackBar(content: Text('Error al crear: $e')),
       );
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -114,140 +104,146 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Nuevo Préstamo')),
-      body: AbsorbPointer(
-        absorbing: _saving,
-        child: Stack(
-          children: [
-            SingleChildScrollView(
+      appBar: AppBar(title: const Text('Nuevo préstamo')),
+      body: Stack(
+        children: [
+          Form(
+            key: _formKey,
+            child: ListView(
               padding: const EdgeInsets.all(16),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  children: [
-                    // Código de cliente
-                    TextFormField(
-                      controller: _codCliCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Código cliente (ej. 006)',
-                        border: OutlineInputBorder(),
-                      ),
-                      validator: (v) =>
-                          (v == null || v.trim().isEmpty) ? 'Requerido' : null,
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Monto
-                    TextFormField(
-                      controller: _montoCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Monto',
-                        hintText: 'Ej. 1000000',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.number,
-                      validator: (v) {
-                        if (v == null || v.trim().isEmpty) return 'Requerido';
-                        final t = v.trim().replaceAll('.', '').replaceAll(',', '.');
-                        final d = double.tryParse(t);
-                        if (d == null) return 'Número inválido';
-                        if (d <= 0) return 'Debe ser mayor a 0';
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Modalidad
-                    DropdownButtonFormField<String>(
-                      value: _modalidad,
-                      items: const [
-                        DropdownMenuItem(value: 'MENSUAL', child: Text('Mensual')),
-                        DropdownMenuItem(value: 'QUINCENAL', child: Text('Quincenal')),
-                      ],
-                      onChanged: (v) {
-                        if (v != null) setState(() => _modalidad = v);
-                      },
-                      decoration: const InputDecoration(
-                        labelText: 'Modalidad',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Fecha inicio
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _pickFecha,
-                            icon: const Icon(Icons.date_range),
-                            label: Text(_fechaStr()),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Número de cuotas
-                    TextFormField(
-                      controller: _numCuotasCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Número de cuotas',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.number,
-                      validator: (v) {
-                        if (v == null || v.trim().isEmpty) return 'Requerido';
-                        final i = int.tryParse(v.trim());
-                        if (i == null) return 'Número inválido';
-                        if (i <= 0) return 'Debe ser mayor a 0';
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Tasa de interés
-                    TextFormField(
-                      controller: _tasaCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Tasa de interés (%)',
-                        hintText: 'Ej. 10.0',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      validator: (v) {
-                        if (v == null || v.trim().isEmpty) return 'Requerido';
-                        final t = v.trim().replaceAll(',', '.');
-                        final d = double.tryParse(t);
-                        if (d == null) return 'Número inválido';
-                        if (d < 0) return 'No puede ser negativa';
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 24),
-
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _guardar,
-                        icon: const Icon(Icons.check),
-                        label: const Text('Guardar'),
-                      ),
-                    ),
-                  ],
+              children: [
+                // Código cliente
+                TextFormField(
+                  controller: _codCliCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Código cliente (ej. 006)',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? 'Requerido' : null,
                 ),
+                const SizedBox(height: 12),
+
+                // Monto
+                TextFormField(
+                  controller: _montoCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Monto',
+                    hintText: 'Ej. 1000000',
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) return 'Requerido';
+                    final t = v.trim().replaceAll('.', '').replaceAll(',', '.');
+                    final d = double.tryParse(t);
+                    if (d == null) return 'Número inválido';
+                    if (d <= 0) return 'Debe ser mayor a 0';
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+
+                // Modalidad
+                DropdownButtonFormField<String>(
+                  value: _modalidad,
+                  items: const [
+                    DropdownMenuItem(value: 'MENSUAL', child: Text('Mensual')),
+                    DropdownMenuItem(value: 'QUINCENAL', child: Text('Quincenal')),
+                  ],
+                  onChanged: (v) => setState(() => _modalidad = v ?? 'MENSUAL'),
+                  decoration: const InputDecoration(
+                    labelText: 'Modalidad',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // Número de cuotas
+                TextFormField(
+                  controller: _numCuotasCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Número de cuotas',
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) return 'Requerido';
+                    final i = int.tryParse(v.trim());
+                    if (i == null) return 'Número inválido';
+                    if (i <= 0) return 'Debe ser mayor a 0';
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+
+                // Tasa de interés
+                TextFormField(
+                  controller: _tasaCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Tasa de interés (%)',
+                    hintText: 'Ej. 10.0',
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) return 'Requerido';
+                    final t = v.trim().replaceAll(',', '.');
+                    final d = double.tryParse(t);
+                    if (d == null) return 'Número inválido';
+                    if (d < 0) return 'No puede ser negativo';
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+
+                // Fecha inicio
+                InkWell(
+                  onTap: _pickFecha,
+                  borderRadius: BorderRadius.circular(8),
+                  child: InputDecorator(
+                    decoration: const InputDecoration(
+                      labelText: 'Fecha de inicio',
+                      border: OutlineInputBorder(),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          _fecha == null
+                              ? 'Selecciona una fecha'
+                              : _fecha!.toIso8601String().split('T').first,
+                        ),
+                        const Icon(Icons.date_range),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                SizedBox(
+                  height: 48,
+                  child: FilledButton.icon(
+                    onPressed: _saving ? null : _submit,
+                    icon: const Icon(Icons.save),
+                    label: Text(_saving ? 'Guardando...' : 'Crear'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          if (_saving)
+            const Positioned.fill(
+              child: ColoredBox(
+                color: Color(0x66000000),
+                child: Center(child: CircularProgressIndicator()),
               ),
             ),
-
-            if (_saving)
-              const Positioned.fill(
-                child: ColoredBox(
-                  color: Color(0x66000000),
-                  child: Center(child: CircularProgressIndicator()),
-                ),
-              ),
-          ],
-        ),
+        ],
       ),
     );
   }

@@ -1,9 +1,11 @@
 ﻿# backend/app/routers/prestamos.py
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
-from datetime import date, timedelta
+from pydantic import BaseModel, Field, confloat, conint, field_validator
+from datetime import date, timedelta, datetime
 from app.deps import get_conn
+from typing import Literal, Annotated
+from pydantic.types import StringConstraints
 
 router = APIRouter()
 
@@ -14,8 +16,10 @@ def _table_exists(conn, name: str) -> bool:
     ).fetchone()
     return r is not None
 
+
 def _cols(conn, table: str) -> List[str]:
     return [r["name"] for r in conn.execute(f"PRAGMA table_info({table});").fetchall()]
+
 
 def _pick(cand: List[str], cols: List[str]) -> Optional[str]:
     s = set(cols)
@@ -23,6 +27,7 @@ def _pick(cand: List[str], cols: List[str]) -> Optional[str]:
         if c in s:
             return c
     return None
+
 
 def _add_months(d: date, months: int) -> date:
     y = d.year + (d.month - 1 + months) // 12
@@ -32,6 +37,7 @@ def _add_months(d: date, months: int) -> date:
            31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
     day = min(d.day, dim)
     return date(y, m, day)
+
 
 def _cuota_row_to_dict(row, cols_q: List[str]) -> Dict[str, Any]:
     num_col   = "cuota_numero" if "cuota_numero" in cols_q else _pick(["numero"], cols_q) or "cuota_numero"
@@ -47,6 +53,7 @@ def _cuota_row_to_dict(row, cols_q: List[str]) -> Dict[str, Any]:
         "interes_pagado": float(row[ipg_col]) if row[ipg_col] is not None else 0.0,
         "estado": row[est_col] or "PENDIENTE",
     }
+
 
 def _prestamo_item_row_to_dict(row) -> Dict[str, Any]:
     # El SELECT ya devuelve alias estándar: monto/fecha_inicio
@@ -73,12 +80,20 @@ def _prestamo_item_row_to_dict(row) -> Dict[str, Any]:
 
 # ---------- modelos ----------
 class PrestamoIn(BaseModel):
-    cod_cli: str = Field(..., min_length=1)
-    monto: float = Field(..., gt=0)                   # -> importe_credito
-    modalidad: str = Field(..., pattern=r"^(?i)(Mensual|Quincenal)$")
-    fecha_inicio: date                                # -> fecha_credito
-    num_cuotas: int = Field(..., ge=1, le=360)
-    tasa_interes: float = Field(..., gt=0, le=100)
+    cod_cli: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    importe_credito: Annotated[float, Field(gt=0)]
+    tasa_interes: Annotated[float, Field(ge=0)]
+    modalidad: Literal["Mensual", "Quincenal"]
+    numero_cuotas: Annotated[int, Field(gt=0)]
+
+    @field_validator("cod_cli", mode="before")
+    @classmethod
+    def trim_code(cls, v):
+        if isinstance(v, str):
+            v = v.strip()
+        if not v:
+            raise ValueError("cod_cli requerido")
+        return v
 
 # ---------- GET /prestamos ----------
 @router.get("")
@@ -183,7 +198,8 @@ def obtener_prestamo(id: int):
                 out["cliente"] = {"id": cli["id"], "codigo": cli["codigo"], "nombre": cli["nombre"]}
 
         # cuotas
-        cuotas = []
+        cuotas: List[Dict[str, Any]] = []
+        fk_q = None
         if _table_exists(conn, "cuotas"):
             cols_q = _cols(conn, "cuotas")
             fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
@@ -193,6 +209,64 @@ def obtener_prestamo(id: int):
             ).fetchall()
             cuotas = [_cuota_row_to_dict(r, cols_q) for r in rows_q]
 
+        # ------------------ NUEVO: calcular 'estado' del préstamo ------------------
+        estado = "PENDIENTE"
+        try:
+            # a) ¿todas las cuotas están pagadas?
+            todas_pagadas = bool(cuotas) and all(
+                (str(c.get("estado", "")).upper() == "PAGADO") for c in cuotas
+            )
+
+            # b) ¿capital cubierto por abonos?
+            capital_pagado = 0.0
+            if _table_exists(conn, "abonos_capital"):
+                r = conn.execute(
+                    "SELECT COALESCE(SUM(monto),0) AS s FROM abonos_capital WHERE id_prestamo = ?",
+                    (id,)
+                ).fetchone()
+                if r and ("s" in r.keys()):
+                    capital_pagado = float(r["s"]) or 0.0
+            elif fk_q is not None:
+                # fallback: sumar columna 'abono_capital' en cuotas si existe
+                cols_q2 = _cols(conn, "cuotas")
+                if "abono_capital" in cols_q2:
+                    r = conn.execute(
+                        f"SELECT COALESCE(SUM(abono_capital),0) AS s FROM cuotas WHERE {fk_q} = ?",
+                        (id,)
+                    ).fetchone()
+                    if r and ("s" in r.keys()):
+                        capital_pagado = float(r["s"]) or 0.0
+
+            importe_credito = float(out["monto"]) if out.get("monto") is not None else 0.0
+            capital_cubierto = (importe_credito - capital_pagado) <= 1e-6
+
+            # c) ¿vencido?
+            vencido = False
+            try:
+                hoy = date.today()
+                for c in cuotas:
+                    est = str(c.get("estado", "")).upper()
+                    if est == "PAGADO":
+                        continue
+                    fv_raw = c.get("fecha_vencimiento")
+                    if isinstance(fv_raw, str):
+                        fv = datetime.fromisoformat(fv_raw).date()
+                        if fv < hoy:
+                            vencido = True
+                            break
+            except Exception:
+                pass
+
+            if todas_pagadas and capital_cubierto:
+                estado = "PAGADO"
+            elif vencido:
+                estado = "VENCIDO"
+            else:
+                estado = "PENDIENTE"
+        except Exception:
+            estado = "PENDIENTE"
+        # -------------------------------------------------------------------------
+
         return {
             "id": out["id"],
             "cliente": out["cliente"],
@@ -201,6 +275,7 @@ def obtener_prestamo(id: int):
             "fecha_inicio": out["fecha_inicio"],
             "num_cuotas": out["num_cuotas"],
             "tasa_interes": out["tasa_interes"],
+            "estado": estado,  # <--- NUEVO
             "cuotas": cuotas,
         }
 
@@ -273,7 +348,7 @@ def crear_prestamo(data: PrestamoIn):
         if not row:
             raise HTTPException(status_code=500, detail="Error al recuperar el préstamo recién creado")
 
-        cuotas = []
+        cuotas: List[Dict[str, Any]] = []
         if _table_exists(conn, "cuotas"):
             cols_q = _cols(conn, "cuotas")
             fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
@@ -291,5 +366,6 @@ def crear_prestamo(data: PrestamoIn):
             "fecha_inicio": row["fecha_inicio"],
             "num_cuotas": row["num_cuotas"],
             "tasa_interes": row["tasa_interes"],
+            "estado": "PENDIENTE",  # recién creado
             "cuotas": cuotas,
         }
