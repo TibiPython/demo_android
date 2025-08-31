@@ -4,8 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 
 import 'loan_service.dart';
-import 'loan_model.dart';
-import 'ui/loan_detail_page.dart';
 
 class LoanNewPage extends ConsumerStatefulWidget {
   const LoanNewPage({super.key});
@@ -16,14 +14,12 @@ class LoanNewPage extends ConsumerStatefulWidget {
 
 class _LoanNewPageState extends ConsumerState<LoanNewPage> {
   final _formKey = GlobalKey<FormState>();
-
   final _codCliCtrl = TextEditingController();
   final _montoCtrl = TextEditingController();
-  final _numCuotasCtrl = TextEditingController();
-  final _tasaCtrl = TextEditingController();
-
-  DateTime? _fecha;
-  String _modalidad = 'MENSUAL'; // se mantiene como usa la app
+  final _numCuotasCtrl = TextEditingController(text: '1');
+  final _tasaCtrl = TextEditingController(text: '0');
+  DateTime _fechaInicio = DateTime.now();
+  String _modalidad = 'Mensual';
   bool _saving = false;
 
   @override
@@ -35,66 +31,77 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
     super.dispose();
   }
 
-  Future<void> _pickFecha() async {
-    final now = DateTime.now();
+  String? _req(String? v) => (v == null || v.trim().isEmpty) ? 'Requerido' : null;
+
+  String? _num(String? v, {bool integer = false, bool positive = true}) {
+    final s = (v ?? '').trim().replaceAll('.', '').replaceAll(',', '.');
+    if (s.isEmpty) return 'Requerido';
+    final n = num.tryParse(s);
+    if (n == null) return 'Número inválido';
+    if (positive && n <= 0) return 'Debe ser mayor a 0';
+    if (integer && n is! int && n.truncateToDouble() != n.toDouble()) {
+      return 'Debe ser entero';
+    }
+    return null;
+  }
+
+  Future<void> _pickDate() async {
     final d = await showDatePicker(
       context: context,
-      initialDate: _fecha ?? now,
-      firstDate: DateTime(now.year - 2),
-      lastDate: DateTime(now.year + 3),
+      firstDate: DateTime(2000, 1, 1),
+      lastDate: DateTime(2100, 12, 31),
+      initialDate: _fechaInicio,
     );
-    if (d != null) setState(() => _fecha = d);
+    if (d != null) setState(() => _fechaInicio = d);
   }
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    if (_fecha == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecciona la fecha de inicio')),
-      );
-      return;
-    }
+
+    setState(() => _saving = true);
     try {
-      setState(() => _saving = true);
+      final api = ref.read(prestamosServiceProvider);
 
       final codCli = _codCliCtrl.text.trim();
 
-      // Permite coma decimal y quita separadores de miles
+      // normalizar monto y tasa
       final montoTxt = _montoCtrl.text.trim().replaceAll('.', '').replaceAll(',', '.');
       final monto = double.parse(montoTxt);
 
       final numCuotas = int.parse(_numCuotasCtrl.text.trim());
 
       final tasaTxt = _tasaCtrl.text.trim().replaceAll(',', '.');
-      final tasa = double.parse(tasaTxt);
+      final tasaInteres = double.parse(tasaTxt);
 
-      final fechaInicio = _fecha!.toIso8601String().split('T').first; // YYYY-MM-DD
+      final fechaInicio = _fechaInicio.toIso8601String().substring(0, 10);
 
-      final svc = ref.read(prestamosServiceProvider);
-
-      // svc.crear devuelve Map<String, dynamic> (respuesta del backend)
-      final resp = await svc.crear(
+      await api.create(
         codCli: codCli,
         monto: monto,
-        modalidad: _modalidad.toUpperCase(), // 'MENSUAL' | 'QUINCENAL' (como lo usa tu backend actual)
+        modalidad: _modalidad,
         fechaInicio: fechaInicio,
         numCuotas: numCuotas,
-        tasaInteres: tasa,
+        tasaInteres: tasaInteres,
       );
 
-      // A modelo Prestamo
-      final prestamo = Prestamo.fromJson(resp);
-
-      if (!mounted) return;
-      // Navegar al detalle
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => LoanDetailPage(id: prestamo.id)),
-      );
-    } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error al crear: $e')),
+        const SnackBar(content: Text('Préstamo creado')),
+      );
+
+      // Cierre seguro: si el árbol es page-based, evitar pop imperativo y no mostrar error
+      try {
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop(true);
+        }
+      } catch (_) {
+        // Si falla por ser router declarativo, no hacemos nada (el usuario vuelve con "<")
+      }
+    } on Exception catch (e) {
+      if (!mounted) return;
+      final msg = e.toString();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error al crear: $msg')),
       );
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -107,132 +114,108 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
       appBar: AppBar(title: const Text('Nuevo préstamo')),
       body: Stack(
         children: [
-          Form(
-            key: _formKey,
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                // Código cliente
-                TextFormField(
-                  controller: _codCliCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Código cliente (ej. 006)',
-                    border: OutlineInputBorder(),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Form(
+              key: _formKey,
+              child: ListView(
+                children: [
+                  TextFormField(
+                    controller: _codCliCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Código cliente (ej. 006)',
+                      border: OutlineInputBorder(),
+                    ),
+                    textInputAction: TextInputAction.next,
+                    validator: _req,
                   ),
-                  validator: (v) =>
-                      (v == null || v.trim().isEmpty) ? 'Requerido' : null,
-                ),
-                const SizedBox(height: 12),
+                  const SizedBox(height: 12),
 
-                // Monto
-                TextFormField(
-                  controller: _montoCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Monto',
-                    hintText: 'Ej. 1000000',
-                    border: OutlineInputBorder(),
+                  TextFormField(
+                    controller: _montoCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Monto',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                    validator: (v) => _num(v, integer: false, positive: true),
                   ),
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
-                  validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Requerido';
-                    final t = v.trim().replaceAll('.', '').replaceAll(',', '.');
-                    final d = double.tryParse(t);
-                    if (d == null) return 'Número inválido';
-                    if (d <= 0) return 'Debe ser mayor a 0';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 12),
+                  const SizedBox(height: 12),
 
-                // Modalidad
-                DropdownButtonFormField<String>(
-                  value: _modalidad,
-                  items: const [
-                    DropdownMenuItem(value: 'MENSUAL', child: Text('Mensual')),
-                    DropdownMenuItem(value: 'QUINCENAL', child: Text('Quincenal')),
-                  ],
-                  onChanged: (v) => setState(() => _modalidad = v ?? 'MENSUAL'),
-                  decoration: const InputDecoration(
-                    labelText: 'Modalidad',
-                    border: OutlineInputBorder(),
+                  DropdownButtonFormField<String>(
+                    value: _modalidad,
+                    items: const [
+                      DropdownMenuItem(value: 'Mensual', child: Text('Mensual')),
+                      DropdownMenuItem(value: 'Quincenal', child: Text('Quincenal')),
+                    ],
+                    onChanged: (v) => setState(() => _modalidad = v ?? 'Mensual'),
+                    decoration: const InputDecoration(
+                      labelText: 'Modalidad',
+                      border: OutlineInputBorder(),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
+                  const SizedBox(height: 12),
 
-                // Número de cuotas
-                TextFormField(
-                  controller: _numCuotasCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Número de cuotas',
-                    border: OutlineInputBorder(),
+                  TextFormField(
+                    controller: _numCuotasCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Número de cuotas',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    validator: (v) => _num(v, integer: true, positive: true),
                   ),
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Requerido';
-                    final i = int.tryParse(v.trim());
-                    if (i == null) return 'Número inválido';
-                    if (i <= 0) return 'Debe ser mayor a 0';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 12),
+                  const SizedBox(height: 12),
 
-                // Tasa de interés
-                TextFormField(
-                  controller: _tasaCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Tasa de interés (%)',
-                    hintText: 'Ej. 10.0',
-                    border: OutlineInputBorder(),
+                  TextFormField(
+                    controller: _tasaCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Tasa de interés (%)',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                    validator: (v) {
+                      final s = (v ?? '').trim().replaceAll(',', '.');
+                      if (s.isEmpty) return 'Requerido';
+                      final n = num.tryParse(s);
+                      if (n == null) return 'Número inválido';
+                      if (n < 0) return 'Debe ser >= 0';
+                      return null;
+                    },
                   ),
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
-                  validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Requerido';
-                    final t = v.trim().replaceAll(',', '.');
-                    final d = double.tryParse(t);
-                    if (d == null) return 'Número inválido';
-                    if (d < 0) return 'No puede ser negativo';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 12),
+                  const SizedBox(height: 12),
 
-                // Fecha inicio
-                InkWell(
-                  onTap: _pickFecha,
-                  borderRadius: BorderRadius.circular(8),
-                  child: InputDecorator(
+                  InputDecorator(
                     decoration: const InputDecoration(
                       labelText: 'Fecha de inicio',
                       border: OutlineInputBorder(),
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          _fecha == null
-                              ? 'Selecciona una fecha'
-                              : _fecha!.toIso8601String().split('T').first,
-                        ),
-                        const Icon(Icons.date_range),
-                      ],
+                    child: InkWell(
+                      onTap: _pickDate,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(_fechaInicio.toIso8601String().substring(0, 10)),
+                          const Icon(Icons.calendar_today),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 24),
+                  const SizedBox(height: 20),
 
-                SizedBox(
-                  height: 48,
-                  child: FilledButton.icon(
-                    onPressed: _saving ? null : _submit,
-                    icon: const Icon(Icons.save),
-                    label: Text(_saving ? 'Guardando...' : 'Crear'),
+                  SizedBox(
+                    height: 48,
+                    child: ElevatedButton.icon(
+                      onPressed: _saving ? null : _submit,
+                      icon: const Icon(Icons.save),
+                      label: Text(_saving ? 'Guardando...' : 'Crear'),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
 

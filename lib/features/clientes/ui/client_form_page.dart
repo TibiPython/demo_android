@@ -31,26 +31,35 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
     super.dispose();
   }
 
-  String? _req(String? v) => (v == null || v.trim().isEmpty) ? 'Requerido' : null;
+  String? _req(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return 'Requerido';
+    if (s.length < 2) return 'Mínimo 2 caracteres';
+    return null;
+  }
+
+  String? _tel(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return null; // opcional
+    final ok = RegExp(r'^\+?\d{6,15}\$').hasMatch(s);
+    return ok ? null : 'Teléfono inválido';
+  }
+
   String? _email(String? v) {
     final s = (v ?? '').trim();
     if (s.isEmpty) return null; // opcional
     final ok = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(s);
     return ok ? null : 'Email inválido';
   }
-  String? _tel(String? v) {
-    final s = (v ?? '').trim();
-    if (s.isEmpty) return null; // opcional
-    return RegExp(r'^\+?\d{6,15}\$').hasMatch(s) ? null : 'Teléfono inválido';
-  }
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+
     setState(() => _saving = true);
     try {
       final dio = ref.read(dioProvider);
       final payload = <String, dynamic>{
-        // 'codigo' lo asigna el backend automáticamente (no enviar)
+        // IMPORTANTE: no enviar 'codigo' — lo asigna el backend automáticamente
         'nombre': _nombreCtrl.text.trim(),
         'identificacion': _identCtrl.text.trim(),
         'direccion': _dirCtrl.text.trim(),
@@ -63,7 +72,7 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cliente creado')),
       );
-      Navigator.pop(context, true); // para refrescar la lista
+      Navigator.pop(context, true); // para refrescar la lista al volver
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -86,12 +95,13 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
             key: _formKey,
             child: ListView(
               children: [
-                // Código (solo visual; backend lo autogenera)
+                // Código (solo visual; el backend lo autogenera al guardar)
                 TextFormField(
                   controller: _codigoCtrl,
-                  readOnly: true, // asignado automáticamente por backend
+                  readOnly: true, // no editable
                   decoration: const InputDecoration(
                     labelText: 'Código',
+                    hintText: 'Se asigna al guardar',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -154,11 +164,20 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                 const SizedBox(height: 20),
 
                 SizedBox(
-                  height: 48,
+                  width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: _saving ? null : _submit,
+                    onPressed: _submit,
                     icon: const Icon(Icons.save),
-                    label: Text(_saving ? 'Guardando...' : 'Guardar'),
+                    label: _saving
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 6),
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : const Text('Guardar'),
                   ),
                 ),
               ],

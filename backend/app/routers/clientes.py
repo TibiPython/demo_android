@@ -7,14 +7,15 @@ from app.deps import get_conn
 router = APIRouter()
 
 # ---------- Tipos con validación (Pydantic v2) ----------
-NombreStr     = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
-CodigoStr     = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{1,10}$")]        # '003', '15', etc.
-TelefonoStr   = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\+?\d{6,15}$")]     # solo dígitos (+ opcional)
-IdentStr      = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=30)]
-DireccionStr  = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=120)]
+NombreStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=80)]
+CodigoStr = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{1,10}$")]
+TelefonoStr = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\+?\d{6,15}$")]
+IdentStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=30)]
+DireccionStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=120)]
+
 
 class ClienteIn(BaseModel):
-    # Si el backend autogenera 'codigo', lo dejamos opcional; si te llega, validamos pero NO lo usaremos al insertar.
+    # Si el backend autogenera 'codigo', lo dejamos opcional; si te llega, validamos pero NO lo usamos al insertar.
     codigo: Optional[CodigoStr] = None
     nombre: NombreStr
     identificacion: Optional[IdentStr] = None
@@ -28,6 +29,7 @@ class ClienteIn(BaseModel):
         if isinstance(v, str) and not v.strip():
             return None
         return v
+
 
 class ClienteUpdate(BaseModel):
     # PUT parcial: solo actualiza lo que venga no vacío
@@ -44,11 +46,13 @@ class ClienteUpdate(BaseModel):
             return None
         return v
 
+
 # ---------- util ----------
+
 def _table_exists(conn, name: str) -> bool:
     r = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-        (name,)
+        (name,),
     ).fetchone()
     return r is not None
 
@@ -70,12 +74,14 @@ def _generar_siguiente_codigo(conn) -> str:
         """
     ).fetchone()
     max_num = int(row["max_num"]) if row and row["max_num"] is not None else 0
-    width   = int(row["width"])   if row and row["width"]   is not None else 3
+    width = int(row["width"]) if row and row["width"] is not None else 3
     if width < 3:
         width = 3
     return str(max_num + 1).zfill(width)
 
+
 # ---------- Endpoints ----------
+
 @router.get("")
 @router.get("/", include_in_schema=False)
 def listar_clientes():
@@ -84,6 +90,7 @@ def listar_clientes():
             return []
         rows = conn.execute("SELECT * FROM clientes ORDER BY id ASC;").fetchall()
         return [{k: r[k] for k in r.keys()} for r in rows]
+
 
 @router.get("/{id:int}")
 def obtener_cliente(id: int = Path(..., ge=1)):
@@ -95,9 +102,20 @@ def obtener_cliente(id: int = Path(..., ge=1)):
             raise HTTPException(status_code=404, detail="Cliente no encontrado")
         return {k: r[k] for k in r.keys()}
 
+
 @router.get("/{id:int}/detalle")
 def detalle_cliente(id: int = Path(..., ge=1)):
     return obtener_cliente(id)
+
+
+@router.get("/siguiente-codigo")
+def siguiente_codigo():
+    """Devuelve el próximo consecutivo para prefijarlo en el formulario."""
+    with get_conn() as conn:
+        if not _table_exists(conn, "clientes"):
+            raise HTTPException(status_code=404, detail="No existe tabla 'clientes'")
+        return {"codigo": _generar_siguiente_codigo(conn)}
+
 
 @router.post("")
 def crear_cliente(payload: ClienteIn):
@@ -118,8 +136,7 @@ def crear_cliente(payload: ClienteIn):
             if k in cols:
                 fields.append(k)
                 if k == "codigo" and codigo_gen is not None:
-                    # Ignoramos cualquier 'codigo' provisto por el cliente
-                    values.append(codigo_gen)
+                    values.append(codigo_gen)  # ignorar 'codigo' del payload
                 else:
                     values.append(getattr(payload, k))
 
@@ -133,6 +150,7 @@ def crear_cliente(payload: ClienteIn):
         new_id = conn.execute("SELECT last_insert_rowid() AS id;").fetchone()["id"]
         r = conn.execute("SELECT * FROM clientes WHERE id=?;", (new_id,)).fetchone()
         return {k: r[k] for k in r.keys()}
+
 
 @router.put("/{id:int}")
 def actualizar_cliente(id: int, payload: ClienteUpdate):
