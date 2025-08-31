@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import '../../../core/http.dart'; // dioProvider
+import '../../../core/safe_close.dart'; // <-- cierre híbrido
 
 class ClientFormPage extends ConsumerStatefulWidget {
   const ClientFormPage({super.key});
@@ -31,35 +32,26 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
     super.dispose();
   }
 
-  String? _req(String? v) {
-    final s = (v ?? '').trim();
-    if (s.isEmpty) return 'Requerido';
-    if (s.length < 2) return 'Mínimo 2 caracteres';
-    return null;
-  }
-
-  String? _tel(String? v) {
-    final s = (v ?? '').trim();
-    if (s.isEmpty) return null; // opcional
-    final ok = RegExp(r'^\+?\d{6,15}\$').hasMatch(s);
-    return ok ? null : 'Teléfono inválido';
-  }
-
+  String? _req(String? v) => (v == null || v.trim().isEmpty) ? 'Requerido' : null;
   String? _email(String? v) {
     final s = (v ?? '').trim();
-    if (s.isEmpty) return null; // opcional
+    if (s.isEmpty) return null;
     final ok = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(s);
     return ok ? null : 'Email inválido';
+  }
+  String? _tel(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return null;
+    return RegExp(r'^\+?\d{6,15}$').hasMatch(s) ? null : 'Teléfono inválido';
   }
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-
     setState(() => _saving = true);
     try {
       final dio = ref.read(dioProvider);
       final payload = <String, dynamic>{
-        // IMPORTANTE: no enviar 'codigo' — lo asigna el backend automáticamente
+        // NO enviar 'codigo': backend lo asigna
         'nombre': _nombreCtrl.text.trim(),
         'identificacion': _identCtrl.text.trim(),
         'direccion': _dirCtrl.text.trim(),
@@ -72,7 +64,7 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cliente creado')),
       );
-      Navigator.pop(context, true); // para refrescar la lista al volver
+      await SafeClose.pop(context, true); // ← Cierre híbrido
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -95,10 +87,9 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
             key: _formKey,
             child: ListView(
               children: [
-                // Código (solo visual; el backend lo autogenera al guardar)
                 TextFormField(
                   controller: _codigoCtrl,
-                  readOnly: true, // no editable
+                  readOnly: true,
                   decoration: const InputDecoration(
                     labelText: 'Código',
                     hintText: 'Se asigna al guardar',
@@ -106,8 +97,6 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
-
-                // Nombre (requerido)
                 TextFormField(
                   controller: _nombreCtrl,
                   decoration: const InputDecoration(
@@ -117,8 +106,6 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                   validator: _req,
                 ),
                 const SizedBox(height: 12),
-
-                // Identificación (opcional)
                 TextFormField(
                   controller: _identCtrl,
                   decoration: const InputDecoration(
@@ -127,8 +114,6 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
-
-                // Dirección (opcional)
                 TextFormField(
                   controller: _dirCtrl,
                   decoration: const InputDecoration(
@@ -137,8 +122,6 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
-
-                // Teléfono (opcional con validación)
                 TextFormField(
                   controller: _telCtrl,
                   decoration: const InputDecoration(
@@ -150,8 +133,6 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                   validator: _tel,
                 ),
                 const SizedBox(height: 12),
-
-                // Email (opcional con validación)
                 TextFormField(
                   controller: _emailCtrl,
                   decoration: const InputDecoration(
@@ -162,22 +143,12 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                   validator: _email,
                 ),
                 const SizedBox(height: 20),
-
                 SizedBox(
-                  width: double.infinity,
+                  height: 48,
                   child: ElevatedButton.icon(
-                    onPressed: _submit,
+                    onPressed: _saving ? null : _submit,
                     icon: const Icon(Icons.save),
-                    label: _saving
-                        ? const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 6),
-                            child: SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                          )
-                        : const Text('Guardar'),
+                    label: Text(_saving ? 'Guardando...' : 'Guardar'),
                   ),
                 ),
               ],

@@ -1,8 +1,7 @@
-// lib/features/prestamos/loan_new_page.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
-
+import '../../core/safe_close.dart'; // <-- helper híbrido
 import 'loan_service.dart';
 
 class LoanNewPage extends ConsumerStatefulWidget {
@@ -63,16 +62,11 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
       final api = ref.read(prestamosServiceProvider);
 
       final codCli = _codCliCtrl.text.trim();
-
-      // normalizar monto y tasa
       final montoTxt = _montoCtrl.text.trim().replaceAll('.', '').replaceAll(',', '.');
       final monto = double.parse(montoTxt);
-
       final numCuotas = int.parse(_numCuotasCtrl.text.trim());
-
       final tasaTxt = _tasaCtrl.text.trim().replaceAll(',', '.');
       final tasaInteres = double.parse(tasaTxt);
-
       final fechaInicio = _fechaInicio.toIso8601String().substring(0, 10);
 
       await api.create(
@@ -88,15 +82,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Préstamo creado')),
       );
-
-      // Cierre seguro: si el árbol es page-based, evitar pop imperativo y no mostrar error
-      try {
-        if (Navigator.of(context).canPop()) {
-          Navigator.of(context).pop(true);
-        }
-      } catch (_) {
-        // Si falla por ser router declarativo, no hacemos nada (el usuario vuelve con "<")
-      }
+      await SafeClose.pop(context, true); // ← Cierre híbrido
     } on Exception catch (e) {
       if (!mounted) return;
       final msg = e.toString();
@@ -130,7 +116,6 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     validator: _req,
                   ),
                   const SizedBox(height: 12),
-
                   TextFormField(
                     controller: _montoCtrl,
                     decoration: const InputDecoration(
@@ -142,7 +127,6 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     validator: (v) => _num(v, integer: false, positive: true),
                   ),
                   const SizedBox(height: 12),
-
                   DropdownButtonFormField<String>(
                     value: _modalidad,
                     items: const [
@@ -156,7 +140,6 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     ),
                   ),
                   const SizedBox(height: 12),
-
                   TextFormField(
                     controller: _numCuotasCtrl,
                     decoration: const InputDecoration(
@@ -168,7 +151,6 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     validator: (v) => _num(v, integer: true, positive: true),
                   ),
                   const SizedBox(height: 12),
-
                   TextFormField(
                     controller: _tasaCtrl,
                     decoration: const InputDecoration(
@@ -187,7 +169,6 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     },
                   ),
                   const SizedBox(height: 12),
-
                   InputDecorator(
                     decoration: const InputDecoration(
                       labelText: 'Fecha de inicio',
@@ -205,7 +186,6 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     ),
                   ),
                   const SizedBox(height: 20),
-
                   SizedBox(
                     height: 48,
                     child: ElevatedButton.icon(
@@ -218,7 +198,6 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
               ),
             ),
           ),
-
           if (_saving)
             const Positioned.fill(
               child: ColoredBox(

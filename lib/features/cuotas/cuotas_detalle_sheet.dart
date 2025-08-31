@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:demo_android/core/safe_close.dart';
 import 'cuotas_service.dart';
 import 'cuota_model.dart';
 import 'cuota_pago_dialog.dart';
@@ -30,83 +31,71 @@ class CuotasDetalleSheet extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final service = ref.watch(cuotasServiceProvider);
-    final fmtCop = NumberFormat.currency(locale: 'es_CO', symbol: '\$');
-    final fmtDate = DateFormat('yyyy-MM-dd');
-
+    final fmt = NumberFormat.currency(locale: 'es_CO', symbol: r'$');
     return FutureBuilder<Map<String, dynamic>>(
       future: service.obtenerResumenDePrestamo(prestamoId),
       builder: (context, snap) {
         if (snap.connectionState != ConnectionState.done) {
-          return const Center(child: Padding(
-            padding: EdgeInsets.all(24),
-            child: CircularProgressIndicator(),
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snap.hasError) {
+          return Center(child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text('Error: ${snap.error}'),
           ));
         }
-        if (snap.hasError || snap.data == null) {
-          return Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Error cargando préstamo #$prestamoId', style: Theme.of(context).textTheme.titleLarge),
-                const SizedBox(height: 8),
-                Text('${snap.error ?? 'Sin datos'}'),
-                const SizedBox(height: 12),
-                ElevatedButton.icon(
-                  onPressed: () => Navigator.pop(context, false),
-                  icon: const Icon(Icons.close),
-                  label: const Text('Cerrar'),
-                ),
-              ],
-            ),
-          );
-        }
+        final data = snap.data ?? const {};
+        final resumen = (data['resumen'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+        final cuotas = (data['cuotas'] as List? ?? const []).cast<dynamic>()
+            .map((e) => e is Cuota ? e : Cuota.fromJson((e as Map).cast<String, dynamic>()))
+            .toList();
 
-        final resumen = snap.data!['resumen'] as Map<String, dynamic>;
-        final cuotas = (snap.data!['cuotas'] as List).cast<Map<String, dynamic>>();
-        final modalidad = resumen['modalidad'] as String?;
-        final importe = (resumen['importe_credito'] as num?)?.toDouble() ?? 0.0;
-        final tasa = (resumen['tasa_interes'] as num?)?.toDouble();
-        final totalInteres = (resumen['total_interes_a_pagar'] as num?)?.toDouble() ?? 0.0;
-        final totalAbonos = (resumen['total_abonos_capital'] as num?)?.toDouble() ?? 0.0;
-        final totalConInteres = importe + totalInteres;
-
-        return SingleChildScrollView(
-          controller: scrollController,
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16, right: 16,
+            top: 8,
+            bottom: MediaQuery.of(context).viewInsets.bottom + 12,
+          ),
+          child: ListView(
+            controller: scrollController,
             children: [
-              Text('Préstamo #$prestamoId — ${resumen['nombre_cliente'] ?? ''}', style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 8),
-              Wrap(spacing: 16, runSpacing: 8, children: [
-                _kv('Modalidad', modalidad ?? '-'),
-                _kv('Tasa (%)', tasa == null ? '-' : tasa.toString()),
-                _kv('Prestado', fmtCop.format(importe)),
-                _kv('Interés a pagar (total)', fmtCop.format(totalInteres)),
-                _kv('Prestado + Interés', fmtCop.format(totalConInteres)),
-                _kv('Abonos a capital (total)', fmtCop.format(totalAbonos)),
-              ]),
-              const SizedBox(height: 16),
-              Text('Cuotas', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
+              // Resumen
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (resumen['cliente_nombre'] != null) _chip('Cliente', resumen['cliente_nombre'].toString()),
+                  if (resumen['estado'] != null) _estadoChip(resumen['estado'].toString()),
+                  if (resumen['importe_credito'] != null) _chip('Crédito', fmt.format(_f(resumen['importe_credito']))),
+                  if (resumen['tasa_interes'] != null) _chip('Tasa %', _f(resumen['tasa_interes']).toStringAsFixed(2)),
+                  if (resumen['total_interes_a_pagar'] != null) _chip('Interés total', fmt.format(_f(resumen['total_interes_a_pagar']))),
+                  if (resumen['total_abonos_capital'] != null) _chip('Abonos cap.', fmt.format(_f(resumen['total_abonos_capital']))),
+                  if (resumen['capital_pendiente'] != null) _chip('Capital pendiente', fmt.format(_f(resumen['capital_pendiente']))),
+                ],
+              ),
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+
+              // Lista de cuotas
               ListView.separated(
                 shrinkWrap: true,
+                controller: scrollController,
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: cuotas.length,
                 separatorBuilder: (_, __) => const Divider(height: 1),
                 itemBuilder: (_, i) {
                   final c = cuotas[i];
-                  final idCuota = c['id'] as int;
-                  final numCuota = c['cuota_numero']?.toString() ?? '-';
-                  final venc = (c['fecha_vencimiento'] as String?);
-                  final interes = (c['interes_a_pagar'] as num?)?.toDouble() ?? 0.0;
-                  final estado = (c['estado'] as String?) ?? 'PENDIENTE';
-                  final diasMora = (c['dias_mora'] as int?) ?? 0;
+                  final idCuota = c.id;
+                  final numCuota = c.numero?.toString() ?? '-';
+                  final venc = c.fechaVencimiento ?? '-';
+                  final interes = c.interesAPagar ?? 0.0;
+                  final pagado = c.interesPagado ?? 0.0;
+                  final estado = c.estado;
+                  final diasMora = c.diasMora ?? 0;
                   return ListTile(
                     leading: CircleAvatar(child: Text(numCuota)),
-                    title: Text('Vence: ${venc ?? '-'}  ·  Estado: $estado  ·  Mora: ${diasMora}d'),
-                    subtitle: Text('Interés a pagar: ${fmtCop.format(interes)}'),
+                    title: Text('Vence: $venc  ·  Estado: $estado  ·  Mora: ${diasMora}d'),
+                    subtitle: Text('Interés a pagar: ${fmt.format(interes)}  ·  Pagado: ${fmt.format(pagado)}'),
                     trailing: Wrap(spacing: 8, children: [
                       if (estado == 'PENDIENTE')
                         ElevatedButton(
@@ -115,9 +104,12 @@ class CuotasDetalleSheet extends ConsumerWidget {
                             if (pr != null) {
                               try {
                                 await service.pagarCuota(idCuota, interesPagado: pr.interesPagado, fechaPago: pr.fechaPago);
-                                // Cerrar devolviendo true para recargar lista principal
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pago registrado')));
+                                }
+                                // Cerrar devolviendo true para recargar
                                 // ignore: use_build_context_synchronously
-                                Navigator.pop(context, true);
+                                await SafeClose.pop(context, true);
                               } catch (e) {
                                 if (context.mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al pagar: $e')));
@@ -133,11 +125,15 @@ class CuotasDetalleSheet extends ConsumerWidget {
                           if (ar != null) {
                             try {
                               await service.abonarCapital(idCuota, ar.monto, fecha: ar.fecha);
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Abono registrado')));
+                              }
+                              // Cerrar para recargar
                               // ignore: use_build_context_synchronously
-                              Navigator.pop(context, true);
+                              await SafeClose.pop(context, true);
                             } catch (e) {
                               if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al abonar: $e')));
+                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
                               }
                             }
                           }
@@ -155,5 +151,32 @@ class CuotasDetalleSheet extends ConsumerWidget {
     );
   }
 
-  Widget _kv(String k, String v) => Chip(label: Text('$k: $v'));
+  Widget _chip(String k, String v) => Chip(label: Text('$k: $v'));
+
+  Widget _estadoChip(String estado) {
+    final e = estado.toUpperCase();
+    Color bg, fg;
+    switch (e) {
+      case 'PAGADO':
+        bg = const Color(0xFFE0E7FF); fg = const Color(0xFF4338CA);
+        break;
+      case 'VENCIDO':
+        bg = const Color(0xFFFEE2E2); fg = const Color(0xFFB91C1C);
+        break;
+      default:
+        bg = const Color(0xFFFFF7ED); fg = const Color(0xFF9A3412);
+        break;
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: fg.withOpacity(0.25)),
+      ),
+      child: Text(estado, style: TextStyle(color: fg, fontWeight: FontWeight.w600)),
+    );
+  }
+
+  double _f(dynamic v) => (v is num) ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0;
 }

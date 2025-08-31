@@ -1,5 +1,6 @@
 // lib/features/cuotas/abono_capital_dialog.dart
 import 'package:flutter/material.dart';
+import 'package:demo_android/core/safe_close.dart';
 
 class AbonoCapitalResult {
   final double monto;
@@ -11,6 +12,7 @@ Future<AbonoCapitalResult?> showAbonoCapitalDialog(BuildContext context) async {
   final formKey = GlobalKey<FormState>();
   final montoCtrl = TextEditingController();
   DateTime? fecha;
+
   return showDialog<AbonoCapitalResult>(
     context: context,
     builder: (ctx) {
@@ -23,45 +25,51 @@ Future<AbonoCapitalResult?> showAbonoCapitalDialog(BuildContext context) async {
             children: [
               TextFormField(
                 controller: montoCtrl,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Monto del abono'),
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  labelText: 'Monto',
+                  border: OutlineInputBorder(),
+                ),
                 validator: (v){
-                  final x = double.tryParse(v ?? '');
-                  if (x == null || x <= 0) return 'Ingrese un valor válido';
+                  final s = (v ?? '').trim().replaceAll(',', '.');
+                  if (s.isEmpty) return 'Requerido';
+                  final n = num.tryParse(s);
+                  if (n == null) return 'Número inválido';
+                  if (n <= 0) return 'Debe ser > 0';
                   return null;
                 },
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
               Row(
                 children: [
-                  Expanded(child: Text(fecha == null ? 'Fecha: hoy' : 'Fecha: ${fecha!.toIso8601String().substring(0,10)}')),
+                  Expanded(child: Text(fecha == null ? 'Sin fecha' : 'Fecha: ${fecha!.toIso8601String().substring(0,10)}')),
                   TextButton(
                     onPressed: () async {
-                      final now = DateTime.now();
-                      final picked = await showDatePicker(
+                      final d = await showDatePicker(
                         context: ctx,
-                        firstDate: DateTime(now.year-2),
-                        lastDate: DateTime(now.year+2),
-                        initialDate: now,
+                        firstDate: DateTime(2000,1,1),
+                        lastDate: DateTime(2100,12,31),
+                        initialDate: DateTime.now(),
                       );
-                      if (picked != null) {
-                        fecha = picked;
+                      if (d != null) {
+                        fecha = d;
                         (ctx as Element).markNeedsBuild();
                       }
                     },
-                    child: const Text('Cambiar fecha'),
-                  )
+                    child: const Text('Elegir fecha'),
+                  ),
                 ],
-              )
+              ),
             ],
           ),
         ),
         actions: [
-          TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('Cancelar')),
+          TextButton(onPressed: ()=> SafeClose.pop(ctx), child: const Text('Cancelar')),
           ElevatedButton(
             onPressed: (){
               if(formKey.currentState!.validate()){
-                Navigator.pop(ctx, AbonoCapitalResult(double.parse(montoCtrl.text), fecha));
+                final val = double.parse(montoCtrl.text.trim().replaceAll(',', '.'));
+                SafeClose.pop(ctx, AbonoCapitalResult(val, fecha));
               }
             },
             child: const Text('Confirmar'),

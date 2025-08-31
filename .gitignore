@@ -1,45 +1,59 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# ==== Flutter / Dart ====
 .dart_tool/
+.packages
+.flutter-plugins
 .flutter-plugins-dependencies
-.pub-cache/
-.pub/
-/build/
-/coverage/
+.melos_tool/
+**/build/
+**/.DS_Store
 
-# Symbolication related
-app.*.symbols
+# iOS / Android
+ios/Pods/
+ios/Podfile.lock
+android/.gradle/
+android/local.properties
+android/app/debug.keystore
+android/app/*.apk
+android/app/*.aab
+android/app/release/
+*.keystore
+*.jks
+android/key.properties
 
-# Obfuscation related
-app.*.map.json
+# IDE
+.vscode/
+.idea/
+*.iml
 
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+# ==== Python backend ====
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# ==== Secretos & datos ====
+# .env (en cualquier parte) y el específico del backend
+*.env
+backend/.env
+
+# Bases de datos / data locales
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+
+# Logs y archivos generados en runtime
+*.log
+backend/data/*.log
+backend/data/*.csv
+backend/data/abonos_capital_log.csv
+backend/data/tmp*/
+backend/data/backup*/
