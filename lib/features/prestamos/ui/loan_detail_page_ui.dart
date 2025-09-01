@@ -1,24 +1,71 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
+import '../loan_service.dart';
 
-import '../../../core/http.dart';           // dioProvider
-import '../loan_model.dart';                // Prestamo
-import 'status_theme.dart';                 // LoanTintedSection + LoanStatusBadge
-
-class LoanDetailPageUI extends ConsumerWidget {
+class LoanDetailPageUI extends ConsumerStatefulWidget {
   final int id;
   const LoanDetailPageUI({super.key, required this.id});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final dio = ref.watch(dioProvider);
-    final fmt = NumberFormat.currency(locale: 'es_CO', symbol: r'$');
+  ConsumerState<LoanDetailPageUI> createState() => _LoanDetailPageUIState();
+}
 
+class _LoanDetailPageUIState extends ConsumerState<LoanDetailPageUI> with WidgetsBindingObserver {
+  Future<Map<String, dynamic>>? _future;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _future = _fetch();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _reload();
+  }
+
+  Future<Map<String, dynamic>> _fetch() async {
+    final api = ref.read(prestamosApiProvider);
+    final res = await api.getResumenByPrestamoId(widget.id); // usa RESUMEN
+    return Map<String, dynamic>.from(res);
+  }
+
+  Future<void> _reload() async { setState(() => _future = _fetch()); await _future; }
+
+  Widget _pill(String estado) {
+    final e = estado.toUpperCase();
+    Color bg, fg;
+    switch (e) { case 'PAGADO': bg = const Color(0xFFE0E7FF); fg = const Color(0xFF4338CA); break;
+      case 'VENCIDO': bg = const Color(0xFFFEE2E2); fg = const Color(0xFFB91C1C); break;
+      default: bg = const Color(0xFFFFF7ED); fg = const Color(0xFF9A3412); }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(999), border: Border.all(color: fg.withOpacity(0.25))),
+      child: Text(estado, style: TextStyle(color: fg, fontWeight: FontWeight.w600)),
+    );
+  }
+
+  Widget _kv(String k, String v) => v.isEmpty ? const SizedBox.shrink() : Padding(
+    padding: const EdgeInsets.only(bottom: 4),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('$k: ', style: const TextStyle(fontWeight: FontWeight.bold)),
+      Expanded(child: Text(v)),
+    ]),
+  );
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Detalle del préstamo')),
       body: FutureBuilder<Map<String, dynamic>>(
-        future: _fetch(dio, id),
+        future: _future,
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
             return const Center(child: CircularProgressIndicator());
@@ -26,138 +73,81 @@ class LoanDetailPageUI extends ConsumerWidget {
           if (snap.hasError) {
             return Center(child: Text('Error: ${snap.error}'));
           }
+
           final data = snap.data ?? const <String, dynamic>{};
-          final p = Prestamo.fromJson(data);
+          final resumen = (data['resumen'] as Map? ?? const {}).cast<String, dynamic>();
+          final cuotas = List<Map<String, dynamic>>.from(data['cuotas'] as List? ?? const []);
 
-          final clienteNombre = (p.cliente['nombre'] ?? '').toString();
-          final clienteCodigo = (p.cliente['codigo'] ?? '').toString();
-          final estado = p.estado;
-
-          final header = LoanTintedSection(
-            estado: estado,
-            margin: const EdgeInsets.all(16),
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        clienteNombre.isEmpty ? 'Cliente' : clienteNombre,
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
-                      ),
-                    ),
-                    LoanStatusBadge(estado: estado),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Código: $clienteCodigo',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Colors.black.withOpacity(0.6),
-                      ),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        fmt.format(p.monto),
-                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
-                      ),
-                    ),
-                    Text(
-                      p.modalidad,
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          );
+          final cliente = Map<String, dynamic>.from(resumen['cliente'] as Map? ?? const {});
+          final estado = (resumen['estado'] ?? '').toString();
 
           return ListView(
+            padding: const EdgeInsets.all(16),
             children: [
-              header,
-              _infoTile('Fecha inicio', _fmtDate(p.fechaInicio)),
-              _infoTile('Cuotas', p.numCuotas.toString()),
-              _infoTile('Tasa interés', '${p.tasaInteres.toStringAsFixed(2)} %'),
-              const Divider(),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: Text('Cuotas', style: Theme.of(context).textTheme.titleMedium),
-              ),
-              ...p.cuotas.map((c) {
-                // Intentar leer fecha de pago SI existe en el modelo (no rompe si no está)
-                DateTime? fechaPago;
-                try {
-                  final dynamic cd = c;
-                  fechaPago = cd.fechaPago as DateTime?;
-                } catch (_) {
-                  fechaPago = null;
-                }
-
-                // ----- UI de la ficha de cada cuota -----
-                return ListTile(
-                  // Sin leading para no duplicar ID/número.
-                  title: Column(
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Vence: ${_fmtStrDate(c.fechaVencimiento)}'),
-                      if (fechaPago != null)
-                        Text(
-                          'Fecha de pago: ${_fmtStrDate(fechaPago)}',
-                          style: Theme.of(context).textTheme.bodySmall,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    (cliente['nombre'] ?? '(sin cliente)').toString(),
+                                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                                _pill(estado),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            _kv('Código', (cliente['codigo'] ?? '').toString()),
+                            _kv('Modalidad', (resumen['modalidad'] ?? '').toString()),
+                            _kv('Vence', (resumen['vence_ultima_cuota'] ?? '').toString()),
+                            _kv('Crédito', (resumen['importe_credito'] ?? '').toString()),
+                            _kv('Tasa %', (resumen['tasa_interes'] ?? '').toString()),
+                            _kv('Interés total', (resumen['total_interes_a_pagar'] ?? '').toString()),
+                            _kv('Abonos capital', (resumen['total_abonos_capital'] ?? '').toString()),
+                            _kv('Capital pendiente', (resumen['capital_pendiente'] ?? '').toString()),
+                          ],
                         ),
+                      ),
                     ],
                   ),
-                  // Aquí SOLO mostramos el monto pagado (una vez).
-                  subtitle: Wrap(
-                    spacing: 6,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Text('Monto pagado: ${fmt.format(c.interesPagado)}'),
-                      const Text('·'),
-                      const Text('Estado:'),
-                    ],
-                  ),
-                  // El estado va a la derecha, coloreado como antes.
-                  trailing: Text(
-                    c.estado,
-                    style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                      color: LoanStatusTheme.of(context, c.estado).fg,
-                    ),
-                  ),
-                );
-              }),
-              const SizedBox(height: 24),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text('Cuotas', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              ...cuotas.map((c) => Card(child: ListTile(
+                leading: CircleAvatar(child: Text('${c['numero'] ?? c['cuota_numero'] ?? ''}')),
+                // ⬇️ Aquí añadimos la "Fecha de pago" (si existe) justo debajo de "Vence:"
+                title: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Vence: ${c['fecha_vencimiento'] ?? ''}'),
+                    (() {
+                      final v = c['fecha_pago'];
+                      if (v == null) return const SizedBox.shrink();
+                      final s = v.toString();
+                      if (s.isEmpty) return const SizedBox.shrink();
+                      final out = s.length >= 10 ? s.substring(0, 10) : s;
+                      return Text('Fecha de pago: $out', style: Theme.of(context).textTheme.bodySmall);
+                    }()),
+                  ],
+                ),
+                subtitle: Text('Interés a pagar: ${c['interes_a_pagar'] ?? ''}  •  Pagado: ${c['interes_pagado'] ?? ''}'),
+                trailing: Text((c['estado'] ?? '').toString()),
+              ))),
             ],
           );
         },
       ),
     );
   }
-
-  Future<Map<String, dynamic>> _fetch(dio, int id) async {
-    final res = await dio.get('/prestamos/$id');
-    return (res.data as Map).cast<String, dynamic>();
-  }
-
-  String _fmtDate(DateTime d) => d.toIso8601String().substring(0, 10);
-  String _fmtStrDate(DateTime d) => d.toIso8601String().substring(0, 10);
-
-  Widget _infoTile(String k, String v) => ListTile(
-        dense: true,
-        title: Text(k),
-        trailing: Text(
-          v,
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
-      );
 }
