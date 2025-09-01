@@ -226,7 +226,7 @@ class _CuotaCard extends StatelessWidget {
             // Encabezado
             Row(
               children: [
-                CircleAvatar(child: Text(numTxt)),
+                //CircleAvatar(child: Text(numTxt)),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(

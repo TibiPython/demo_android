@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
-import '../../core/safe_close.dart'; // <-- helper híbrido
+import '../../core/safe_close.dart';
 import 'loan_service.dart';
+import '../clientes/ui/client_picker_sheet.dart'; // <-- NUEVO: hoja modal
 
 class LoanNewPage extends ConsumerStatefulWidget {
   const LoanNewPage({super.key});
@@ -54,6 +55,13 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
     if (d != null) setState(() => _fechaInicio = d);
   }
 
+  Future<void> _openClientPicker() async {
+    final sel = await showClientPickerSheet(context);
+    if (sel != null && mounted) {
+      setState(() => _codCliCtrl.text = sel);
+    }
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -82,7 +90,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Préstamo creado')),
       );
-      await SafeClose.pop(context, true); // ← Cierre híbrido
+      await SafeClose.pop(context, true);
     } on Exception catch (e) {
       if (!mounted) return;
       final msg = e.toString();
@@ -106,16 +114,24 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
               key: _formKey,
               child: ListView(
                 children: [
-                  TextFormField(
-                    controller: _codCliCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Código cliente (ej. 006)',
-                      border: OutlineInputBorder(),
+                  // ===== Código cliente: ahora abre hoja modal =====
+                  GestureDetector(
+                    onTap: _openClientPicker,
+                    child: AbsorbPointer(
+                      child: TextFormField(
+                        controller: _codCliCtrl,
+                        readOnly: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Código cliente (toque para elegir)',
+                          border: OutlineInputBorder(),
+                          suffixIcon: Icon(Icons.search),
+                        ),
+                        validator: _req,
+                      ),
                     ),
-                    textInputAction: TextInputAction.next,
-                    validator: _req,
                   ),
                   const SizedBox(height: 12),
+
                   TextFormField(
                     controller: _montoCtrl,
                     decoration: const InputDecoration(
@@ -127,6 +143,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     validator: (v) => _num(v, integer: false, positive: true),
                   ),
                   const SizedBox(height: 12),
+
                   DropdownButtonFormField<String>(
                     value: _modalidad,
                     items: const [
@@ -140,6 +157,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     ),
                   ),
                   const SizedBox(height: 12),
+
                   TextFormField(
                     controller: _numCuotasCtrl,
                     decoration: const InputDecoration(
@@ -151,6 +169,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     validator: (v) => _num(v, integer: true, positive: true),
                   ),
                   const SizedBox(height: 12),
+
                   TextFormField(
                     controller: _tasaCtrl,
                     decoration: const InputDecoration(
@@ -169,6 +188,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     },
                   ),
                   const SizedBox(height: 12),
+
                   InputDecorator(
                     decoration: const InputDecoration(
                       labelText: 'Fecha de inicio',
@@ -186,6 +206,7 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
                     ),
                   ),
                   const SizedBox(height: 20),
+
                   SizedBox(
                     height: 48,
                     child: ElevatedButton.icon(
@@ -199,13 +220,22 @@ class _LoanNewPageState extends ConsumerState<LoanNewPage> {
             ),
           ),
           if (_saving)
-            const Positioned.fill(
-              child: ColoredBox(
-                color: Color(0x66000000),
-                child: Center(child: CircularProgressIndicator()),
-              ),
-            ),
+            const PositionedFillOverlay(),
         ],
+      ),
+    );
+  }
+}
+
+class PositionedFillOverlay extends StatelessWidget {
+  const PositionedFillOverlay({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const Positioned.fill(
+      child: ColoredBox(
+        color: Color(0x66000000),
+        child: Center(child: CircularProgressIndicator()),
       ),
     );
   }

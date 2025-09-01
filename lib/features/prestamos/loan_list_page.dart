@@ -1,97 +1,143 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
-import 'loan_service.dart';
+import 'package:intl/intl.dart';
+import 'package:go_router/go_router.dart' show GoRouter;
+
+import '../../core/http.dart';
 import 'loan_model.dart';
+import 'loan_new_page.dart';              // <-- para abrir la creación
+import 'ui/loan_detail_page_ui.dart';
+import 'ui/status_theme.dart';
 
-final _codCliProvider = StateProvider<String>((ref) => '');
-final _prestamosFutureProvider = FutureProvider.autoDispose<PrestamosResp>((ref) async {
-  final svc = ref.read(prestamosServiceProvider);
-  final cod = ref.watch(_codCliProvider);
-  return svc.listar(codCli: cod.isEmpty ? null : cod);
-});
+class LoanListPage extends ConsumerStatefulWidget {
+  const LoanListPage({super.key});
 
-class PrestamosListPage extends ConsumerStatefulWidget {
-  const PrestamosListPage({super.key});
   @override
-  ConsumerState<PrestamosListPage> createState() => _PrestamosListPageState();
+  ConsumerState<LoanListPage> createState() => _LoanListPageState();
 }
 
-class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
-  final _codCtrl = TextEditingController();
-  Timer? _debouncer;
+class _LoanListPageState extends ConsumerState<LoanListPage> {
+  late Future<PrestamosResp> _future;
 
   @override
-  void dispose() {
-    _debouncer?.cancel();
-    _codCtrl.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _future = _load();
   }
 
-  void _onCodChanged(String v) {
-    _debouncer?.cancel();
-    _debouncer = Timer(const Duration(milliseconds: 350), () {
-      ref.read(_codCliProvider.notifier).state = v;
-    });
+  Future<PrestamosResp> _load() async {
+    final dio = ref.read(dioProvider);
+    final res = await dio.get('/prestamos', queryParameters: {'page': 1, 'page_size': 100});
+    return PrestamosResp.fromJson((res.data as Map).cast<String, dynamic>());
   }
 
-  void _openDetalle(PrestamoItem it) {
-    context.push('/prestamos/${it.id}'); // 👈 GoRouter al detalle por id
+  Future<void> _openDetail(BuildContext context, int id) async {
+    final gr = GoRouter.maybeOf(context);
+    if (gr != null) {
+      await gr.push('/prestamos/$id');
+      if (mounted) setState(() => _future = _load());
+      return;
+    }
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => LoanDetailPageUI(id: id)));
+    if (mounted) setState(() => _future = _load());
+  }
+
+  Future<void> _openNew(BuildContext context) async {
+    final result = await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const LoanNewPage()),
+    );
+    if (result == true && mounted) {
+      setState(() => _future = _load()); // refrescar al volver
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final listaAsync = ref.watch(_prestamosFutureProvider);
+    final fmt = NumberFormat.currency(locale: 'es_CO', symbol: r'$');
 
     return Scaffold(
       appBar: AppBar(title: const Text('Préstamos')),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => context.push('/prestamos/nuevo'), // 👈 GoRouter al “Nuevo”
-        child: const Icon(Icons.add),
+      body: FutureBuilder<PrestamosResp>(
+        future: _future,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Center(child: Text('Error: ${snap.error}'));
+          }
+          final items = snap.data?.items ?? const <PrestamoItem>[];
+          if (items.isEmpty) {
+            return const Center(child: Text('No hay préstamos'));
+          }
+
+          return ListView.separated(
+            itemCount: items.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (_, i) {
+              final it = items[i];
+              final estado = it.estado;
+              final nombre = (it.cliente['nombre'] ?? '').toString();
+              final codigo = (it.cliente['codigo'] ?? '').toString();
+              final monto = it.monto;
+
+              return InkWell(
+                onTap: () => _openDetail(context, it.id),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                  child: LoanTintedSection(
+                    estado: estado,
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                nombre.isEmpty ? 'Cliente' : nombre,
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                            ),
+                            LoanStatusBadge(estado: estado),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Código: $codigo',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: Colors.black.withOpacity(0.6),
+                              ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                fmt.format(monto), // $ antes
+                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                              ),
+                            ),
+                            if ((it.modalidad).isNotEmpty)
+                              Text(it.modalidad, style: Theme.of(context).textTheme.titleSmall),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
       ),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: TextField(
-              controller: _codCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Filtrar por código de cliente (ej. 001)',
-                prefixIcon: Icon(Icons.filter_list),
-                border: OutlineInputBorder(),
-              ),
-              onChanged: _onCodChanged,
-            ),
-          ),
-          Expanded(
-            child: listaAsync.when(
-              data: (resp) {
-                if (resp.items.isEmpty) return const Center(child: Text('Sin préstamos'));
-                return ListView.separated(
-                  itemCount: resp.items.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (ctx, i) {
-                    final it = resp.items[i];
-                    final cod = it.cliente['codigo'] ?? '';
-                    final nom = it.cliente['nombre'] ?? '';
-                    return ListTile(
-                      title: Text('#${it.id} — $cod — $nom'),
-                      subtitle: Text(
-                        'Monto: ${it.monto} | ${it.fechaInicio.toString().substring(0,10)} | '
-                        'Cuotas: ${it.numCuotas} | Tasa: ${it.tasaInteres}%',
-                      ),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: () => _openDetalle(it),
-                    );
-                  },
-                );
-              },
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) => Center(child: Text('Error: $e')),
-            ),
-          ),
-        ],
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _openNew(context),
+        child: const Icon(Icons.add),
       ),
     );
   }

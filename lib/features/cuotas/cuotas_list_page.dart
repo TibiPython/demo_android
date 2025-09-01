@@ -70,8 +70,9 @@ class _CuotasListPageState extends ConsumerState<CuotasListPage> {
                     ? '-'
                     : fmtDate.format(p.venceUltimaCuota!);
                 return ListTile(
-                  leading: CircleAvatar(child: Text(p.id.toString())),
-                  title: Text('ID ${p.id}  ·  ${p.nombreCliente ?? ''}'),
+                  // leading eliminado para no repetir el ID
+                  // leading: CircleAvatar(child: Text(p.id.toString())),
+                  title: Text(p.nombreCliente ?? ''),
                   subtitle: Text('VENCE: $venceTxt'),
                   trailing: Chip(
                     label: Text(p.estado),

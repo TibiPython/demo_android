@@ -50,11 +50,12 @@ def _cuota_row_to_dict(row, cols_q: List[str]) -> Dict[str, Any]:
 def _prestamo_item_row_to_dict(row) -> Dict[str, Any]:
     d = {
         "id": row["id"],
-        "monto": row["monto"],  # alias de importe_credito
+        "monto": row["monto"],
         "modalidad": row["modalidad"],
-        "fecha_inicio": row["fecha_inicio"],  # alias de fecha_credito
+        "fecha_inicio": row["fecha_inicio"],
         "num_cuotas": row["num_cuotas"],
         "tasa_interes": row["tasa_interes"],
+        "estado": row["estado"] if "estado" in row.keys() else "PENDIENTE",
         "cliente": {"id": None, "codigo": None, "nombre": None},
     }
     if "cliente_id" in row.keys():
@@ -69,7 +70,6 @@ def _prestamo_item_row_to_dict(row) -> Dict[str, Any]:
 
 # -------- modelos --------
 class PrestamoIn(BaseModel):
-    # Acepta ambos nombres para compatibilidad con el cliente actual
     cod_cli: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     importe_credito: Annotated[float, Field(gt=0, validation_alias=AliasChoices("importe_credito", "monto"))]
     tasa_interes:   Annotated[float, Field(ge=0, validation_alias=AliasChoices("tasa_interes", "tasa"))]
@@ -110,8 +110,11 @@ def listar_prestamos(
             return {"total": 0, "items": []}
 
         has_clientes = _table_exists(conn, "clientes")
+        has_cuotas = _table_exists(conn, "cuotas")
+
         cols_p = _cols(conn, "prestamos")
         cols_c = _cols(conn, "clientes") if has_clientes else []
+        cols_q = _cols(conn, "cuotas") if has_cuotas else []
 
         can_join_by_code = ("cod_cli" in cols_p) and ("codigo" in cols_c)
         join_cond = "p.cod_cli = c.codigo" if (has_clientes and can_join_by_code) else None
@@ -129,14 +132,7 @@ def listar_prestamos(
                 params.append(f"%{cod_cli}%")
         where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
-        # total
-        if do_join:
-            q_total = f"SELECT COUNT(*) AS c FROM prestamos p JOIN clientes c ON {join_cond}{where_sql};"
-        else:
-            q_total = f"SELECT COUNT(*) AS c FROM prestamos p{where_sql};"
-        total = conn.execute(q_total, tuple(params)).fetchone()["c"]
-
-        # select (alias hacia el front)
+        # ---- SELECT base (alias hacia el front)
         select_cols = (
             "p.id, p.importe_credito AS monto, p.modalidad, "
             "p.fecha_credito AS fecha_inicio, p.num_cuotas, p.tasa_interes"
@@ -146,6 +142,34 @@ def listar_prestamos(
         else:
             select_cols += ", p.cod_cli AS p_cod_cli"
 
+        # ---- Estado calculado también en la lista
+        estado_sql = "'PENDIENTE' AS estado"
+        if has_cuotas:
+            fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
+            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else _pick(["fecha","vencimiento"], cols_q) or "fecha_vencimiento"
+            estado_sql = f"""
+            CASE
+              WHEN EXISTS (SELECT 1 FROM cuotas q WHERE q.{fk_q}=p.id)
+                   AND NOT EXISTS (SELECT 1 FROM cuotas q WHERE q.{fk_q}=p.id AND UPPER(COALESCE(q.estado,''))<>'PAGADO')
+                THEN 'PAGADO'
+              WHEN EXISTS (SELECT 1 FROM cuotas q 
+                           WHERE q.{fk_q}=p.id 
+                             AND UPPER(COALESCE(q.estado,''))<>'PAGADO' 
+                             AND DATE(q.{fecha_col}) < DATE('now'))
+                THEN 'VENCIDO'
+              ELSE 'PENDIENTE'
+            END AS estado
+            """
+        select_cols = f"{select_cols}, {estado_sql}"
+
+        # ---- total
+        if do_join:
+            q_total = f"SELECT COUNT(*) AS c FROM prestamos p JOIN clientes c ON {join_cond}{where_sql};"
+        else:
+            q_total = f"SELECT COUNT(*) AS c FROM prestamos p{where_sql};"
+        total = conn.execute(q_total, tuple(params)).fetchone()["c"]
+
+        # ---- query paginada
         if do_join:
             q = f"SELECT {select_cols} FROM prestamos p JOIN clientes c ON {join_cond}{where_sql} ORDER BY p.id DESC LIMIT ? OFFSET ?;"
         else:
@@ -199,7 +223,6 @@ def obtener_prestamo(id: int):
 
         # cuotas
         cuotas: List[Dict[str, Any]] = []
-        fk_q = None
         if _table_exists(conn, "cuotas"):
             cols_q = _cols(conn, "cuotas")
             fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
@@ -209,7 +232,7 @@ def obtener_prestamo(id: int):
             ).fetchall()
             cuotas = [_cuota_row_to_dict(r, cols_q) for r in rows_q]
 
-        # estado (opcional, no crítico)
+        # estado
         estado = "PENDIENTE"
         try:
             todas_pagadas = bool(cuotas) and all(str(c.get("estado","")).upper()=="PAGADO" for c in cuotas)

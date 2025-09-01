@@ -1,23 +1,65 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
-import '../loan_service.dart';
+import 'package:intl/intl.dart';
+import 'package:go_router/go_router.dart' show GoRouter;
 
-class PrestamosListPage extends ConsumerWidget {
+import '../../../core/http.dart';
+import '../loan_model.dart';
+import '../loan_new_page.dart';           // <-- para abrir la creación
+import 'loan_detail_page_ui.dart';
+import 'status_theme.dart';
+
+class PrestamosListPage extends ConsumerStatefulWidget {
   const PrestamosListPage({super.key});
 
-  Future<List<Map<String, dynamic>>> _fetch(WidgetRef ref) async {
-    final api = ref.read(prestamosApiProvider);
-    final page = await api.list(page: 1, pageSize: 20);
-    return List<Map<String, dynamic>>.from(page['items']);
+  @override
+  ConsumerState<PrestamosListPage> createState() => _PrestamosListPageState();
+}
+
+class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
+  late Future<PrestamosResp> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _load();
+  }
+
+  Future<PrestamosResp> _load() async {
+    final dio = ref.read(dioProvider);
+    final res = await dio.get('/prestamos', queryParameters: {'page': 1, 'page_size': 100});
+    return PrestamosResp.fromJson((res.data as Map).cast<String, dynamic>());
+  }
+
+  Future<void> _openDetail(BuildContext context, int id) async {
+    final gr = GoRouter.maybeOf(context);
+    if (gr != null) {
+      await gr.push('/prestamos/$id');
+      if (mounted) setState(() => _future = _load());
+      return;
+    }
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => LoanDetailPageUI(id: id)));
+    if (mounted) setState(() => _future = _load());
+  }
+
+  Future<void> _openNew(BuildContext context) async {
+    // Abrimos imperativo para no depender de rutas; no rompe go_router
+    final result = await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const LoanNewPage()),
+    );
+    if (result == true && mounted) {
+      setState(() => _future = _load()); // refrescar al volver
+    }
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
+    final fmt = NumberFormat.currency(locale: 'es_CO', symbol: r'$');
+
     return Scaffold(
       appBar: AppBar(title: const Text('Préstamos')),
-      body: FutureBuilder<List<Map<String, dynamic>>>(
-        future: _fetch(ref),
+      body: FutureBuilder<PrestamosResp>(
+        future: _future,
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
             return const Center(child: CircularProgressIndicator());
@@ -25,33 +67,77 @@ class PrestamosListPage extends ConsumerWidget {
           if (snap.hasError) {
             return Center(child: Text('Error: ${snap.error}'));
           }
-          final items = snap.data ?? const [];
-          if (items.isEmpty) return const Center(child: Text('Sin préstamos'));
+          final items = snap.data?.items ?? const <PrestamoItem>[];
+          if (items.isEmpty) {
+            return const Center(child: Text('No hay préstamos'));
+          }
 
           return ListView.separated(
             itemCount: items.length,
             separatorBuilder: (_, __) => const Divider(height: 1),
             itemBuilder: (_, i) {
-              final p = items[i];
-              final id = p['id'] as int;
-              final cliente = p['cliente'] as Map?;
-              final clienteNom = (cliente?['nombre'] ?? '(sin cliente)').toString();
-              final monto = p['monto'];
-              final cuotas = p['num_cuotas'];
+              final it = items[i];
+              final estado = it.estado; // viene del backend
+              final nombre = (it.cliente['nombre'] ?? '').toString();
+              final codigo = (it.cliente['codigo'] ?? '').toString();
+              final monto = it.monto;
 
-              return ListTile(
-                leading: const Icon(Icons.request_page),
-                title: Text(clienteNom),
-                subtitle: Text('Monto: $monto  •  Cuotas: $cuotas'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => context.push('/prestamos/$id'),
+              return InkWell(
+                onTap: () => _openDetail(context, it.id),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                  child: LoanTintedSection(
+                    estado: estado,
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                nombre.isEmpty ? 'Cliente' : nombre,
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                            ),
+                            LoanStatusBadge(estado: estado),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Código: $codigo',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: Colors.black.withOpacity(0.6),
+                              ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                fmt.format(monto), // $ antes
+                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                              ),
+                            ),
+                            if ((it.modalidad).isNotEmpty)
+                              Text(it.modalidad, style: Theme.of(context).textTheme.titleSmall),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               );
             },
           );
         },
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => context.push('/prestamos/nuevo'), // 👈 GoRouter
+        onPressed: () => _openNew(context),
         child: const Icon(Icons.add),
       ),
     );
