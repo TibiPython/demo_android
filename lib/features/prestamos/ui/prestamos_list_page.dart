@@ -1,6 +1,6 @@
 // Pantalla principal de la lista de Préstamos (se importa desde main.dart).
 // Nota: aquí se muestra cada préstamo con Nombre, Estado, Código, Monto, Modalidad,
-// y la línea extra "Vence: …   •   Tasa: …%".
+// y la línea extra "Vence: …   •   Tasa: …%". Además se añadió "No. de cuotas".
 // El tap sobre un préstamo NO navega al detalle (detalle deshabilitado).
 
 import 'package:flutter/material.dart';
@@ -76,18 +76,18 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
               // Calcular "Vence" (última cuota) a partir de fechaInicio + numCuotas y modalidad
               final dtFmt = DateFormat('yyyy-MM-dd');
               String venceTxt = '-';
+              final int numCuotas = (it.numCuotas ?? 0) as int; // <-- No. de cuotas
               try {
                 final fiStr = (it.fechaInicio ?? '').toString();
                 if (fiStr.isNotEmpty) {
                   final fi = DateTime.parse(fiStr);
-                  final n = (it.numCuotas ?? 0) as int;
                   final mod = (it.modalidad ?? '').toString().toLowerCase();
-                  if (n > 0) {
+                  if (numCuotas > 0) {
                     if (mod.startsWith('men')) {
-                      final v = DateTime(fi.year, fi.month + n, fi.day);
+                      final v = DateTime(fi.year, fi.month + numCuotas, fi.day);
                       venceTxt = dtFmt.format(v);
                     } else {
-                      final v = fi.add(Duration(days: 15 * n));
+                      final v = fi.add(Duration(days: 15 * numCuotas));
                       venceTxt = dtFmt.format(v);
                     }
                   }
@@ -132,9 +132,17 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
                             ),
                       ),
                       const SizedBox(height: 4),
-                      // Línea extra con Vence y Tasa (lo demás queda igual)
+                      // Línea con Vence y Tasa (lo demás queda igual)
                       Text(
                         'Vence: $venceTxt${tasaTxt.isEmpty ? '' : '   •   Tasa: $tasaTxt%'}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Colors.black.withOpacity(0.6),
+                            ),
+                      ),
+                      const SizedBox(height: 4),
+                      // NUEVO: No. de cuotas (línea aparte, mismo estilo)
+                      Text(
+                        'No. de cuotas: $numCuotas',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: Colors.black.withOpacity(0.6),
                             ),
