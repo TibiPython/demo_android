@@ -1,12 +1,15 @@
+// Pantalla principal de la lista de Préstamos (se importa desde main.dart).
+// Nota: aquí se muestra cada préstamo con Nombre, Estado, Código, Monto, Modalidad,
+// y la línea extra "Vence: …   •   Tasa: …%".
+// El tap sobre un préstamo NO navega al detalle (detalle deshabilitado).
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'package:go_router/go_router.dart' show GoRouter;
 
 import '../../../core/http.dart';
 import '../loan_model.dart';
-import '../loan_new_page.dart';           // <-- para abrir la creación
-import 'loan_detail_page_ui.dart';
+import '../loan_new_page.dart';
 import 'status_theme.dart';
 
 class PrestamosListPage extends ConsumerStatefulWidget {
@@ -31,19 +34,7 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
     return PrestamosResp.fromJson((res.data as Map).cast<String, dynamic>());
   }
 
-  Future<void> _openDetail(BuildContext context, int id) async {
-    final gr = GoRouter.maybeOf(context);
-    if (gr != null) {
-      await gr.push('/prestamos/$id');
-      if (mounted) setState(() => _future = _load());
-      return;
-    }
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => LoanDetailPageUI(id: id)));
-    if (mounted) setState(() => _future = _load());
-  }
-
   Future<void> _openNew(BuildContext context) async {
-    // Abrimos imperativo para no depender de rutas; no rompe go_router
     final result = await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const LoanNewPage()),
     );
@@ -82,53 +73,88 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
               final codigo = (it.cliente['codigo'] ?? '').toString();
               final monto = it.monto;
 
-              return InkWell(
-                onTap: () => _openDetail(context, it.id),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                  child: LoanTintedSection(
-                    estado: estado,
-                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                nombre.isEmpty ? 'Cliente' : nombre,
-                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                              ),
+              // Calcular "Vence" (última cuota) a partir de fechaInicio + numCuotas y modalidad
+              final dtFmt = DateFormat('yyyy-MM-dd');
+              String venceTxt = '-';
+              try {
+                final fiStr = (it.fechaInicio ?? '').toString();
+                if (fiStr.isNotEmpty) {
+                  final fi = DateTime.parse(fiStr);
+                  final n = (it.numCuotas ?? 0) as int;
+                  final mod = (it.modalidad ?? '').toString().toLowerCase();
+                  if (n > 0) {
+                    if (mod.startsWith('men')) {
+                      final v = DateTime(fi.year, fi.month + n, fi.day);
+                      venceTxt = dtFmt.format(v);
+                    } else {
+                      final v = fi.add(Duration(days: 15 * n));
+                      venceTxt = dtFmt.format(v);
+                    }
+                  }
+                }
+              } catch (_) {}
+
+              // Tasa % (solo si es numérico para evitar errores de tipo)
+              final String tasaTxt = (() {
+                final t = it.tasaInteres;
+                if (t == null) return '';
+                if (t is num) return t.toStringAsFixed(2);
+                return ''; // ignorar otros tipos
+              })();
+
+              // SIN navegación al detalle (no onTap)
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                child: LoanTintedSection(
+                  estado: estado,
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              nombre.isEmpty ? 'Cliente' : nombre,
+                              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
                             ),
-                            LoanStatusBadge(estado: estado),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Código: $codigo',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: Colors.black.withOpacity(0.6),
-                              ),
-                        ),
-                        const SizedBox(height: 10),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                fmt.format(monto), // $ antes
-                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                              ),
+                          ),
+                          LoanStatusBadge(estado: estado),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Código: $codigo',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Colors.black.withOpacity(0.6),
                             ),
-                            if ((it.modalidad).isNotEmpty)
-                              Text(it.modalidad, style: Theme.of(context).textTheme.titleSmall),
-                          ],
-                        ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(height: 4),
+                      // Línea extra con Vence y Tasa (lo demás queda igual)
+                      Text(
+                        'Vence: $venceTxt${tasaTxt.isEmpty ? '' : '   •   Tasa: $tasaTxt%'}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Colors.black.withOpacity(0.6),
+                            ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              fmt.format(monto),
+                              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                            ),
+                          ),
+                          if ((it.modalidad).isNotEmpty)
+                            Text(it.modalidad, style: Theme.of(context).textTheme.titleSmall),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
               );
