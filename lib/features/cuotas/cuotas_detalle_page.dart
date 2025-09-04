@@ -85,6 +85,7 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                 margin: const EdgeInsets.symmetric(vertical: 6),
                 child: Stack(
                   children: [
+                    // Reservamos espacio a la derecha para que el chip no se superponga
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 12, 128, 12),
                       child: Column(
@@ -99,35 +100,47 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                             spacing: 16,
                             runSpacing: 8,
                             children: [
-                              _kv('Modalidad', r.modalidad ?? '-'),
+                              _kv(context, 'Modalidad', r.modalidad ?? '-'),
                               _kv(
+                                context,
                                 'Vence',
                                 r.venceUltimaCuota == null
                                     ? '-'
                                     : fmtDate.format(r.venceUltimaCuota!),
                               ),
                               _kv(
+                                context,
                                 'Crédito',
                                 r.importeCredito == null
                                     ? '-'
                                     : fmtMoney.format(r.importeCredito),
                               ),
-                              _kv('Tasa %', r.tasaInteres?.toStringAsFixed(2) ?? '-'),
-                              _kv('Interés total', fmtMoney.format(r.totalInteresAPagar)),
-                              _kv('Abonos capital', fmtMoney.format(r.totalAbonosCapital)),
-                              _kv('Capital pendiente', fmtMoney.format(r.capitalPendiente)),
+                              _kv(
+                                context,
+                                'Tasa %',
+                                r.tasaInteres?.toStringAsFixed(2) ?? '-',
+                              ),
+                              _kv(context, 'Interés total',
+                                  fmtMoney.format(r.totalInteresAPagar)),
+                              _kv(context, 'Abonos capital',
+                                  fmtMoney.format(r.totalAbonosCapital)),
+                              _kv(context, 'Capital pendiente',
+                                  fmtMoney.format(r.capitalPendiente)),
                             ],
                           ),
                         ],
                       ),
                     ),
+                    // Chip ESTADO arriba-derecha
                     Positioned(
                       right: 8,
                       top: 8,
                       child: Chip(
                         label: Text(r.estado),
-                        labelPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-                        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 0),
+                        labelPadding:
+                            const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 2, vertical: 0),
                         backgroundColor: _estadoColor(r.estado).withOpacity(0.15),
                         side: BorderSide(
                           color: _estadoColor(r.estado).withOpacity(0.25),
@@ -179,13 +192,22 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
     );
   }
 
-  Widget _kv(String k, String v) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text('$k: ', style: const TextStyle(fontWeight: FontWeight.w600)),
-        Text(v),
-      ],
+  /// Par "clave: valor" que **puede partirse en varias líneas** si no cabe,
+  /// para evitar desbordes (overflow) sin cambiar estilo ni colores.
+  Widget _kv(BuildContext context, String k, String v) {
+    final baseStyle = Theme.of(context).textTheme.bodyMedium!;
+    return RichText(
+      text: TextSpan(
+        style: baseStyle,
+        children: [
+          TextSpan(
+            text: '$k: ',
+            style: baseStyle.copyWith(fontWeight: FontWeight.w600),
+          ),
+          TextSpan(text: v),
+        ],
+      ),
+      softWrap: true,
     );
   }
 }
@@ -250,11 +272,14 @@ class _CuotaCard extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
+                // Estado en chip a la derecha
                 Chip(
                   label: Text(estado),
-                  labelPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                  labelPadding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
                   backgroundColor: estadoColor(estado).withOpacity(0.15),
-                  side: BorderSide(color: estadoColor(estado).withOpacity(0.25)),
+                  side:
+                      BorderSide(color: estadoColor(estado).withOpacity(0.25)),
                 ),
               ],
             ),
@@ -267,7 +292,7 @@ class _CuotaCard extends StatelessWidget {
                 Expanded(child: Text('Mora (días): ${moraTxt.isEmpty ? "0" : moraTxt}')),
               ],
             ),
-            // 👇 Mostramos Fecha de pago justo debajo de Vence (si existe)
+            // Fecha de pago (si existe), debajo de Vence
             if (_s(q['fecha_pago']).isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -276,7 +301,6 @@ class _CuotaCard extends StatelessWidget {
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
-
             const SizedBox(height: 8),
 
             // Dos columnas: Interés a pagar / Interés pagado
@@ -297,7 +321,7 @@ class _CuotaCard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
 
-            // Acciones (mantiene icono cerdito en Abono)
+            // Acciones (con icono cerdito en Abono)
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
@@ -305,7 +329,8 @@ class _CuotaCard extends StatelessWidget {
                   ElevatedButton(
                     onPressed: () async {
                       final sugerido = (interesAPagar as num).toDouble();
-                      final result = await showPagoCuotaDialog(context, sugerido: sugerido);
+                      final result =
+                          await showPagoCuotaDialog(context, sugerido: sugerido);
                       if (result == null) return;
                       await onPagar(result.interesPagado, result.fechaPago);
                     },
@@ -316,7 +341,8 @@ class _CuotaCard extends StatelessWidget {
                   onPressed: () async {
                     final result = await showAbonoCapitalDialog(context);
                     if (result == null) return;
-                    await onAbono((result.monto as num).toDouble(), result.fecha);
+                    await onAbono(
+                        (result.monto as num).toDouble(), result.fecha);
                   },
                   icon: const Icon(Icons.savings_outlined),
                   label: const Text('Abono'),
