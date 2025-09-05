@@ -7,6 +7,14 @@ import 'cuotas_service.dart';
 import 'cuota_pago_dialog.dart';
 import 'abono_capital_dialog.dart';
 
+String _pf(num? v) {
+  if (v == null) return '-';
+  final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v);
+  return '\$ ' + s;
+}
+
+
+
 class CuotasDetallePage extends ConsumerStatefulWidget {
   final int prestamoId;
   const CuotasDetallePage({super.key, required this.prestamoId});
@@ -113,7 +121,7 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                                 'Crédito',
                                 r.importeCredito == null
                                     ? '-'
-                                    : fmtMoney.format(r.importeCredito),
+                                    : _pf(r.importeCredito),
                               ),
                               _kv(
                                 context,
@@ -121,11 +129,11 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                                 r.tasaInteres?.toStringAsFixed(2) ?? '-',
                               ),
                               _kv(context, 'Interés total',
-                                  fmtMoney.format(r.totalInteresAPagar)),
+                                  _pf(r.totalInteresAPagar)),
                               _kv(context, 'Abonos capital',
-                                  fmtMoney.format(r.totalAbonosCapital)),
+                                  _pf(r.totalAbonosCapital)),
                               _kv(context, 'Capital pendiente',
-                                  fmtMoney.format(r.capitalPendiente)),
+                                  _pf(r.capitalPendiente)),
                             ],
                           ),
                         ],
@@ -306,8 +314,8 @@ class _CuotaCard extends StatelessWidget {
             // Dos columnas: Interés a pagar / Interés pagado
             Row(
               children: [
-                Expanded(child: Text('Interés a pagar: ${fmtMoney.format(interesAPagar)}')),
-                Expanded(child: Text('Interés pagado: ${fmtMoney.format(interesPagado)}')),
+                Expanded(child: Text('Interés a pagar: ${_pf(interesAPagar)}')),
+                Expanded(child: Text('Interés pagado: ${_pf(interesPagado)}')),
               ],
             ),
             const SizedBox(height: 8),
@@ -315,7 +323,7 @@ class _CuotaCard extends StatelessWidget {
             // Dos columnas: Abono capital / ID cuota
             Row(
               children: [
-                Expanded(child: Text('Abono capital: ${fmtMoney.format(abonoCapital)}')),
+                Expanded(child: Text('Abono capital: ${_pf(abonoCapital)}')),
                 Expanded(child: Text('ID cuota: ${_s(idCuota)}')),
               ],
             ),

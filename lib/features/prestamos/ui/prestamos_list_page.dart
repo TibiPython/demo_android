@@ -12,6 +12,8 @@ import '../loan_model.dart';
 import '../loan_new_page.dart';
 import 'status_theme.dart';
 
+
+String _pf(num? v) { if (v == null) return '-'; final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v); return r'$ ' + s; }
 class PrestamosListPage extends ConsumerStatefulWidget {
   const PrestamosListPage({super.key});
 
@@ -152,7 +154,7 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
                         children: [
                           Expanded(
                             child: Text(
-                              fmt.format(monto),
+                              _pf(monto),
                               style: Theme.of(context).textTheme.titleLarge?.copyWith(
                                     fontWeight: FontWeight.bold,
                                   ),

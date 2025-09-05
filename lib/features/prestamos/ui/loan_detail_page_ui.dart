@@ -10,6 +10,19 @@ class LoanDetailPageUI extends ConsumerStatefulWidget {
   ConsumerState<LoanDetailPageUI> createState() => _LoanDetailPageUIState();
 }
 
+
+String _moneyLeading(String? v) {
+  final raw = (v ?? '').trim();
+  if (raw.isEmpty) return '';
+  // si termina en '$' -> moverlo delante
+  final m = RegExp(r'^(.*?)(?:\s*\$)$').firstMatch(raw);
+  if (m != null) {
+    final body = m.group(1)!.trim();
+    return r'$ ' + body;
+  }
+  // si ya empieza con '$' o no tiene símbolo, dejar igual
+  return raw;
+}
 class _LoanDetailPageUIState extends ConsumerState<LoanDetailPageUI>
     with WidgetsBindingObserver {
   Future<Map<String, dynamic>>? _future;
@@ -111,7 +124,7 @@ class _LoanDetailPageUIState extends ConsumerState<LoanDetailPageUI>
           final modalidad = (resumen['modalidad'] ?? '').toString();
           final venceUltima =
               (resumen['vence_ultima_cuota'] ?? '').toString();
-          final credito = (resumen['importe_credito'] ?? '').toString();
+          final credito = _moneyLeading((resumen['importe_credito'] ?? '').toString());
           final tasa = (resumen['tasa_interes'] ?? '').toString();
 
           return ListView(
@@ -187,7 +200,7 @@ class _LoanDetailPageUIState extends ConsumerState<LoanDetailPageUI>
                         ],
                       ),
                       subtitle: Text(
-                        'Interés a pagar: ${c['interes_a_pagar'] ?? ''}  •  Pagado: ${c['interes_pagado'] ?? ''}',
+                        'Interés a pagar: ${_moneyLeading(c['interes_a_pagar']?.toString())}  •  Pagado: ${_moneyLeading(c["interes_pagado"]?.toString())}',
                       ),
                       trailing: Text((c['estado'] ?? '').toString()),
                     ),

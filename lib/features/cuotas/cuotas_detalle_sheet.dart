@@ -7,6 +7,14 @@ import 'cuota_model.dart';
 import 'cuota_pago_dialog.dart';
 import 'abono_capital_dialog.dart';
 
+String _pf(num? v) {
+  if (v == null) return '-';
+  final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v);
+  return '\$ ' + s;
+}
+
+
+
 Future<bool?> showCuotasDetalleSheet(BuildContext context, {required int prestamoId}) {
   return showModalBottomSheet<bool>(
     context: context,
@@ -80,15 +88,15 @@ class CuotasDetalleSheet extends ConsumerWidget {
                   if (resumen['estado'] != null)
                     _estadoChip(resumen['estado'].toString()),
                   if (resumen['importe_credito'] != null)
-                    _chip('Crédito', fmt.format(_f(resumen['importe_credito']))),
+                    _chip('Crédito', _pf(_f(resumen['importe_credito']))),
                   if (resumen['tasa_interes'] != null)
                     _chip('Tasa %', _f(resumen['tasa_interes']).toStringAsFixed(2)),
                   if (resumen['total_interes_a_pagar'] != null)
-                    _chip('Interés total', fmt.format(_f(resumen['total_interes_a_pagar']))),
+                    _chip('Interés total', _pf(_f(resumen['total_interes_a_pagar']))),
                   if (resumen['total_abonos_capital'] != null)
-                    _chip('Abonos cap.', fmt.format(_f(resumen['total_abonos_capital']))),
+                    _chip('Abonos cap.', _pf(_f(resumen['total_abonos_capital']))),
                   if (resumen['capital_pendiente'] != null)
-                    _chip('Capital pendiente', fmt.format(_f(resumen['capital_pendiente']))),
+                    _chip('Capital pendiente', _pf(_f(resumen['capital_pendiente']))),
                 ],
               ),
               const SizedBox(height: 12),
@@ -115,7 +123,7 @@ class CuotasDetalleSheet extends ConsumerWidget {
                     // leading eliminado para no mostrar el ID/numero en un círculo
                     title: Text('Vence: $venc  ·  Estado: $estado  ·  Mora: ${diasMora}d'),
                     subtitle: Text(
-                      'Interés a pagar: ${fmt.format(interes)}  ·  Pagado: ${fmt.format(pagado)}',
+                      'Interés a pagar: ${_pf(interes)}  ·  Pagado: $${_pf(pagado)}',
                     ),
                     trailing: Wrap(
                       spacing: 8,
