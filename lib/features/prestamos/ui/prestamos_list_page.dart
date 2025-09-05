@@ -12,8 +12,6 @@ import '../loan_model.dart';
 import '../loan_new_page.dart';
 import 'status_theme.dart';
 
-
-String _pf(num? v) { if (v == null) return '-'; final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v); return r'$ ' + s; }
 class PrestamosListPage extends ConsumerStatefulWidget {
   const PrestamosListPage({super.key});
 
@@ -49,6 +47,13 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
   Widget build(BuildContext context) {
     final fmt = NumberFormat.currency(locale: 'es_CO', symbol: r'$');
 
+String _pf(num? v) {
+  if (v == null) return '-';
+  final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v);
+  return '\$\u00A0' + s;
+}
+
+
     return Scaffold(
       appBar: AppBar(title: const Text('Préstamos')),
       body: FutureBuilder<PrestamosResp>(
@@ -73,6 +78,7 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
               final estado = it.estado; // viene del backend
               final nombre = (it.cliente['nombre'] ?? '').toString();
               final codigo = (it.cliente['codigo'] ?? '').toString();
+              final folio = 'P-${it.id.toString().padLeft(4, '0')}';
               final monto = it.monto;
 
               // Calcular "Vence" (última cuota) a partir de fechaInicio + numCuotas y modalidad
@@ -128,7 +134,7 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'Código: $codigo',
+                        'Folio: $folio',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: Colors.black.withOpacity(0.6),
                             ),

@@ -7,14 +7,6 @@ import 'cuotas_service.dart';
 import 'cuota_pago_dialog.dart';
 import 'abono_capital_dialog.dart';
 
-String _pf(num? v) {
-  if (v == null) return '-';
-  final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v);
-  return '\$ ' + s;
-}
-
-
-
 class CuotasDetallePage extends ConsumerStatefulWidget {
   final int prestamoId;
   const CuotasDetallePage({super.key, required this.prestamoId});
@@ -121,7 +113,7 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                                 'Crédito',
                                 r.importeCredito == null
                                     ? '-'
-                                    : _pf(r.importeCredito),
+                                    : fmtMoney.format(r.importeCredito),
                               ),
                               _kv(
                                 context,
@@ -129,11 +121,11 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                                 r.tasaInteres?.toStringAsFixed(2) ?? '-',
                               ),
                               _kv(context, 'Interés total',
-                                  _pf(r.totalInteresAPagar)),
+                                  fmtMoney.format(r.totalInteresAPagar)),
                               _kv(context, 'Abonos capital',
-                                  _pf(r.totalAbonosCapital)),
+                                  fmtMoney.format(r.totalAbonosCapital)),
                               _kv(context, 'Capital pendiente',
-                                  _pf(r.capitalPendiente)),
+                                  fmtMoney.format(r.capitalPendiente)),
                             ],
                           ),
                         ],
@@ -167,7 +159,24 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                     fmtMoney: fmtMoney,
                     estadoColor: _estadoColor,
                     onPagar: (double interes, DateTime? fecha) async {
-                      await service.pagarCuota(
+                                            // Validación: pago secuencial (no se puede pagar una cuota posterior si hay anteriores sin pagar)
+                      final numActual = ((q['cuota_numero'] ?? q['numero']) as num?)?.toInt() ?? 0;
+                      final tienePrevPendiente = data.cuotas.any((c) {
+                        final n = ((c['cuota_numero'] ?? c['numero']) as num?)?.toInt() ?? 0;
+                        if (n >= numActual) return false;
+                        final fecha = (c['fecha_pago'] ?? '').toString();
+                        final pagado = (c['interes_pagado'] ?? 0) as num?;
+                        final aPagar = (c['interes_a_pagar'] ?? 0) as num?;
+                        final isPaid = (fecha.isNotEmpty) || ((pagado ?? 0) >= (aPagar ?? 0));
+                        return !isPaid;
+                      });
+                      if (tienePrevPendiente) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Debe pagar las cuotas en orden (no puede saltarse una anterior).')),
+                        );
+                        return;
+                      }
+await service.pagarCuota(
                         q['id'] as int,
                         interesPagado: interes,
                         fechaPago: fecha,
@@ -180,6 +189,25 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                       }
                     },
                     onAbono: (double monto, DateTime? fecha) async {
+                      // Validación secuencial: no abonar capital si hay cuotas anteriores sin pagar
+                      final numActual = ((q['cuota_numero'] ?? q['numero']) as num?)?.toInt() ?? 0;
+                      final tienePrevPendiente = data.cuotas.any((c) {
+                        final n = ((c['cuota_numero'] ?? c['numero']) as num?)?.toInt() ?? 0;
+                        if (n >= numActual) return false;
+                        final fecha = (c['fecha_pago'] ?? '').toString();
+                        final pagado = (c['interes_pagado'] ?? 0) as num?;
+                        final aPagar = (c['interes_a_pagar'] ?? 0) as num?;
+                        final isPaid = (fecha.isNotEmpty) || ((pagado ?? 0) >= (aPagar ?? 0));
+                        return !isPaid;
+                      });
+                      if (tienePrevPendiente) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Debe pagar las cuotas en orden antes de abonar capital.')),
+                          );
+                        }
+                        return;
+                      }
                       await service.abonarCapital(
                         q['id'] as int,
                         monto,
@@ -314,8 +342,8 @@ class _CuotaCard extends StatelessWidget {
             // Dos columnas: Interés a pagar / Interés pagado
             Row(
               children: [
-                Expanded(child: Text('Interés a pagar: ${_pf(interesAPagar)}')),
-                Expanded(child: Text('Interés pagado: ${_pf(interesPagado)}')),
+                Expanded(child: Text('Interés a pagar: ${fmtMoney.format(interesAPagar)}')),
+                Expanded(child: Text('Interés pagado: ${fmtMoney.format(interesPagado)}')),
               ],
             ),
             const SizedBox(height: 8),
@@ -323,7 +351,7 @@ class _CuotaCard extends StatelessWidget {
             // Dos columnas: Abono capital / ID cuota
             Row(
               children: [
-                Expanded(child: Text('Abono capital: ${_pf(abonoCapital)}')),
+                Expanded(child: Text('Abono capital: ${fmtMoney.format(abonoCapital)}')),
                 Expanded(child: Text('ID cuota: ${_s(idCuota)}')),
               ],
             ),

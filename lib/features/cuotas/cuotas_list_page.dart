@@ -13,6 +13,8 @@ class CuotasListPage extends ConsumerStatefulWidget {
 }
 
 class _CuotasListPageState extends ConsumerState<CuotasListPage> {
+  String folioPrestamo(int id) => 'P-${id.toString().padLeft(4, '0')}';
+
   late CuotasService service;
   late Future<List<PrestamoResumen>> future;
   final fmtDate = DateFormat('yyyy-MM-dd');
@@ -73,7 +75,13 @@ class _CuotasListPageState extends ConsumerState<CuotasListPage> {
                   // leading eliminado para no repetir el ID
                   // leading: CircleAvatar(child: Text(p.id.toString())),
                   title: Text(p.nombreCliente ?? ''),
-                  subtitle: Text('VENCE: $venceTxt'),
+                  subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Folio: ${folioPrestamo(p.id)}'),
+                    Text('VENCE: $venceTxt'),
+                  ],
+                ),
                   trailing: Chip(
                     label: Text(p.estado),
                     backgroundColor: _estadoColor(p.estado).withOpacity(0.2),
