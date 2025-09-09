@@ -1,8 +1,9 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
-import '../../../core/http.dart'; // dioProvider
-import '../../../core/safe_close.dart'; // <-- cierre híbrido
+import 'package:demo_android/core/http.dart'; // dioProvider
+import 'package:demo_android/core/safe_close.dart'; // cierre híbrido
 
 class ClientFormPage extends ConsumerStatefulWidget {
   const ClientFormPage({super.key});
@@ -33,16 +34,35 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
   }
 
   String? _req(String? v) => (v == null || v.trim().isEmpty) ? 'Requerido' : null;
-  String? _email(String? v) {
+
+  // Nombre: sólo letras (incluye acentos) y espacios; requerido
+  String? _nombre(String? v) {
     final s = (v ?? '').trim();
-    if (s.isEmpty) return null;
-    final ok = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(s);
-    return ok ? null : 'Email inválido';
+    if (s.isEmpty) return 'Requerido';
+    final ok = RegExp(r'^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]+$').hasMatch(s);
+    return ok ? null : 'Sólo letras y espacios';
   }
+
+  // Identificación: sólo enteros; requerido
+  String? _ident(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return 'Requerido';
+    return RegExp(r'^\d+$').hasMatch(s) ? null : 'Sólo números enteros';
+  }
+
+  // Teléfono: sólo enteros; requerido
   String? _tel(String? v) {
     final s = (v ?? '').trim();
-    if (s.isEmpty) return null;
-    return RegExp(r'^\+?\d{6,15}$').hasMatch(s) ? null : 'Teléfono inválido';
+    if (s.isEmpty) return 'Requerido';
+    return RegExp(r'^\d+$').hasMatch(s) ? null : 'Sólo números enteros';
+  }
+
+  // Email: requerido + formato básico
+  String? _email(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return 'Requerido';
+    final ok = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(s);
+    return ok ? null : 'Email inválido';
   }
 
   Future<void> _submit() async {
@@ -64,7 +84,7 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cliente creado')),
       );
-      await SafeClose.pop(context, true); // ← Cierre híbrido
+      await SafeClose.pop(context, true); // cierre híbrido
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -103,7 +123,12 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                     labelText: 'Nombre',
                     border: OutlineInputBorder(),
                   ),
-                  validator: _req,
+                  validator: _nombre,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(
+                      RegExp(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]"),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
@@ -112,6 +137,9 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                     labelText: 'Identificación',
                     border: OutlineInputBorder(),
                   ),
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  validator: _ident,
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
@@ -120,6 +148,7 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                     labelText: 'Dirección',
                     border: OutlineInputBorder(),
                   ),
+                  validator: _req, // requerido pero sin restricción de formato
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
@@ -128,7 +157,7 @@ class _ClientFormPageState extends ConsumerState<ClientFormPage> {
                     labelText: 'Teléfono',
                     border: OutlineInputBorder(),
                   ),
-                  keyboardType: TextInputType.phone,
+                  keyboardType: TextInputType.number,
                   inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                   validator: _tel,
                 ),

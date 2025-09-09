@@ -1,9 +1,10 @@
-﻿from fastapi import APIRouter, HTTPException, Query
+﻿from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any, Literal, Annotated
 from pydantic import BaseModel, Field, field_validator, AliasChoices
 from pydantic.types import StringConstraints
 from datetime import date, timedelta, datetime
 from app.deps import get_conn
+from app.notifications import send_loan_created_email  # ⬅️ NUEVO
 
 router = APIRouter()
 
@@ -267,7 +268,7 @@ def obtener_prestamo(id: int):
 # -------- POST /prestamos --------
 @router.post("")
 @router.post("/", include_in_schema=False)
-def crear_prestamo(data: PrestamoIn):
+def crear_prestamo(data: PrestamoIn, background_tasks: BackgroundTasks):
     with get_conn() as conn:
         if not _table_exists(conn, "prestamos"):
             raise HTTPException(status_code=500, detail="No existe tabla 'prestamos'")
@@ -338,7 +339,8 @@ def crear_prestamo(data: PrestamoIn):
             ).fetchall()
             cuotas = [_cuota_row_to_dict(r, cols_q) for r in rows_q]
 
-        return {
+        # ⬇️ Construimos respuesta antes de cerrar/commit
+        resp = {
             "id": row["id"],
             "cliente": {"id": row["cliente_id"], "codigo": row["cliente_codigo"], "nombre": row["cliente_nombre"]},
             "monto": row["monto"],
@@ -349,3 +351,18 @@ def crear_prestamo(data: PrestamoIn):
             "estado": "PENDIENTE",
             "cuotas": cuotas,
         }
+
+        # ⬇️ Commit explícito para asegurar persistencia antes del email
+        try:
+            conn.commit()
+        except Exception:
+            pass
+
+        # ⬇️ Enviar correo en background (no bloquea la respuesta)
+        try:
+            background_tasks.add_task(send_loan_created_email, int(prestamo_id))
+        except Exception:
+            # Nunca romper el flujo por el envío
+            pass
+
+        return resp

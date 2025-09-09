@@ -1,4 +1,13 @@
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Carga explícitamente backend/.env y permite sobreescribir variables existentes
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(dotenv_path=ENV_PATH, override=True)
+
+
 from fastapi import FastAPI
+from app.routers import debug_mail
 from fastapi.middleware.cors import CORSMiddleware
 
 # Routers
@@ -11,7 +20,7 @@ from app.routers import cuotas as cuotas_router  # ✅ usa una sola forma de imp
 from app.deps import get_conn  # ✅ para la conexión SQLite
 
 app = FastAPI()
-
+app.include_router(debug_mail.router) 
 # CORS (igual que antes)
 app.add_middleware(
     CORSMiddleware,

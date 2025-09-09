@@ -1,12 +1,13 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
-import 'package:demo_android/core/api.dart';
+import 'package:demo_android/core/http.dart';
 import 'package:demo_android/core/safe_close.dart';
 
 class ClientEditPage extends ConsumerStatefulWidget {
-  const ClientEditPage({super.key, required this.id});
   final int id;
+  const ClientEditPage({super.key, required this.id});
 
   @override
   ConsumerState<ClientEditPage> createState() => _ClientEditPageState();
@@ -21,8 +22,8 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
   final _telCtrl    = TextEditingController();
   final _emailCtrl  = TextEditingController();
 
-  bool _loading = true;
   bool _saving = false;
+  bool _loading = true;
   String? _error;
 
   @override
@@ -42,36 +43,66 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
     super.dispose();
   }
 
-  Future<void> _fetch() async {
-    setState(() { _loading = true; _error = null; });
-    try {
-      final dio = ref.read(dioProvider);
-      final res = await dio.get('/clientes/${widget.id}');
-      final j = res.data as Map<String, dynamic>;
-      _codigoCtrl.text = (j['codigo'] ?? '').toString();
-      _nombreCtrl.text = (j['nombre'] ?? '').toString();
-      _identCtrl.text  = (j['identificacion'] ?? '').toString();
-      _dirCtrl.text    = (j['direccion'] ?? '').toString();
-      _telCtrl.text    = (j['telefono'] ?? '').toString();
-      _emailCtrl.text  = (j['email'] ?? '').toString();
-    } catch (e) {
-      _error = 'Error al cargar: $e';
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+  String? _req(String? v) => (v == null || v.trim().isEmpty) ? 'Requerido' : null;
+
+  // Nombre: sólo letras (incluye acentos) y espacios; requerido
+  String? _nombre(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return 'Requerido';
+    final ok = RegExp(r'^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]+$').hasMatch(s);
+    return ok ? null : 'Sólo letras y espacios';
   }
 
-  String? _req(String? v) => (v == null || v.trim().isEmpty) ? 'Requerido' : null;
+  // Identificación: sólo enteros; requerido
+  String? _ident(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return 'Requerido';
+    return RegExp(r'^\d+$').hasMatch(s) ? null : 'Sólo números enteros';
+  }
+
+  // Teléfono: sólo enteros; requerido
+  String? _tel(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return 'Requerido';
+    return RegExp(r'^\d+$').hasMatch(s) ? null : 'Sólo números enteros';
+  }
+
+  // Email: requerido + formato básico
   String? _email(String? v) {
     final s = (v ?? '').trim();
-    if (s.isEmpty) return null;
+    if (s.isEmpty) return 'Requerido';
     final ok = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(s);
     return ok ? null : 'Email inválido';
   }
-  String? _tel(String? v) {
-    final s = (v ?? '').trim();
-    if (s.isEmpty) return null;
-    return RegExp(r'^\+?\d{6,15}$').hasMatch(s) ? null : 'Teléfono inválido';
+
+  Future<void> _fetch() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final dio = ref.read(dioProvider);
+      final resp = await dio.get('/clientes/${widget.id}');
+      final data = resp.data;
+      final Map<dynamic, dynamic> root = (data is Map) ? data as Map : <dynamic, dynamic>{};
+      final dynamic c0 = root['cliente'] ?? root;
+      if (c0 is Map) {
+        _codigoCtrl.text = (c0['codigo'] ?? '').toString();
+        _nombreCtrl.text = (c0['nombre'] ?? '').toString();
+        _identCtrl.text  = (c0['identificacion'] ?? '').toString();
+        _dirCtrl.text    = (c0['direccion'] ?? '').toString();
+        _telCtrl.text    = (c0['telefono'] ?? '').toString();
+        _emailCtrl.text  = (c0['email'] ?? '').toString();
+      }
+      setState(() {
+        _loading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _loading = false;
+        _error = '$e';
+      });
+    }
   }
 
   Future<void> _save() async {
@@ -88,7 +119,6 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
       }..removeWhere((k, v) => v == null || (v is String && v.trim().isEmpty));
 
       await dio.put('/clientes/${widget.id}', data: payload);
-
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Cliente actualizado')),
@@ -97,7 +127,7 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error al guardar: $e')),
+        SnackBar(content: Text('Error al actualizar: $e')),
       );
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -111,13 +141,15 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
         : _error != null
             ? Center(
                 child: Padding(
-                  padding: const EdgeInsets.all(16.0),
+                  padding: const EdgeInsets.all(24),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      const Icon(Icons.error_outline, size: 40),
+                      const SizedBox(height: 12),
                       Text(_error!, textAlign: TextAlign.center),
                       const SizedBox(height: 12),
-                      FilledButton.icon(
+                      ElevatedButton.icon(
                         onPressed: _fetch,
                         icon: const Icon(Icons.refresh),
                         label: const Text('Reintentar'),
@@ -137,6 +169,7 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
                         readOnly: true,
                         decoration: const InputDecoration(
                           labelText: 'Código',
+                          hintText: 'Asignado por el sistema',
                           border: OutlineInputBorder(),
                         ),
                       ),
@@ -147,7 +180,12 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
                           labelText: 'Nombre',
                           border: OutlineInputBorder(),
                         ),
-                        validator: _req,
+                        validator: _nombre,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(
+                            RegExp(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]"),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 12),
                       TextFormField(
@@ -156,6 +194,9 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
                           labelText: 'Identificación',
                           border: OutlineInputBorder(),
                         ),
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                        validator: _ident,
                       ),
                       const SizedBox(height: 12),
                       TextFormField(
@@ -164,6 +205,7 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
                           labelText: 'Dirección',
                           border: OutlineInputBorder(),
                         ),
+                        validator: _req,
                       ),
                       const SizedBox(height: 12),
                       TextFormField(
@@ -172,7 +214,7 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
                           labelText: 'Teléfono',
                           border: OutlineInputBorder(),
                         ),
-                        keyboardType: TextInputType.phone,
+                        keyboardType: TextInputType.number,
                         inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                         validator: _tel,
                       ),
@@ -189,7 +231,7 @@ class _ClientEditPageState extends ConsumerState<ClientEditPage> {
                       const SizedBox(height: 20),
                       SizedBox(
                         height: 48,
-                        child: FilledButton.icon(
+                        child: ElevatedButton.icon(
                           onPressed: _saving ? null : _save,
                           icon: const Icon(Icons.save),
                           label: Text(_saving ? 'Guardando...' : 'Guardar'),
