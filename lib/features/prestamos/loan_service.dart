@@ -45,6 +45,90 @@ class PrestamosApi {
     return Map<String, dynamic>.from(resp.data as Map);
   }
 
+  // ===== manual (creación/edición total sin pagos) =====
+  Future<Map<String, dynamic>> crearPrestamoManual({
+    required String codCli,
+    required double monto,
+    required String modalidad,
+    required String fechaInicio,
+    required int numCuotas,
+    required double tasa,
+    required List<Map<String, double>> plan,
+  }) async {
+    final resp = await _dio.post('/prestamos/manual', data: {
+      'cod_cli': codCli.trim(),
+      'monto': monto,
+      'modalidad': modalidad,
+      'fecha_inicio': fechaInicio,
+      'num_cuotas': numCuotas,
+      'tasa': tasa,
+      'plan': plan,
+    });
+    return Map<String, dynamic>.from(resp.data as Map);
+  }
+
+  Future<Map<String, dynamic>> obtenerPlan(int id) async {
+    final r = await _dio.get('/prestamos/$id/plan');
+    return Map<String, dynamic>.from(r.data as Map);
+  }
+
+  Future<Map<String, dynamic>> actualizarPrestamoManual({
+    required int id,
+    required String codCli,
+    required double monto,
+    required String modalidad,
+    required String fechaInicio,
+    required int numCuotas,
+    required double tasa,
+    required List<Map<String, double>> plan,
+  }) async {
+    final resp = await _dio.put('/prestamos/$id/manual', data: {
+      'cod_cli': codCli.trim(),
+      'monto': monto,
+      'modalidad': modalidad,
+      'fecha_inicio': fechaInicio,
+      'num_cuotas': numCuotas,
+      'tasa': tasa,
+      'plan': plan,
+    });
+    return Map<String, dynamic>.from(resp.data as Map);
+  }
+
+  // ===== automático (edición total sin pagos) =====
+  Future<Map<String, dynamic>> actualizarPrestamoAuto({
+    required int id,
+    required String codCli,
+    required double monto,
+    required String modalidad,
+    required String fechaInicio,
+    required int numCuotas,
+    required double tasaInteres,
+  }) async {
+    final resp = await _dio.put('/prestamos/$id', data: {
+      'cod_cli': codCli.trim(),
+      'monto': monto,
+      'modalidad': modalidad,
+      'fecha_inicio': fechaInicio,
+      'num_cuotas': numCuotas,
+      'tasa_interes': tasaInteres,
+    });
+    return Map<String, dynamic>.from(resp.data as Map);
+  }
+
+  // ===== replan (editar pendientes + agregar cuotas) =====
+  Future<Map<String, dynamic>> replanPrestamo({
+    required int id,
+    String? modalidad, // si null, se usa la actual
+    required List<Map<String, double>> planPendiente,
+  }) async {
+    final resp = await _dio.put('/prestamos/$id/replan', data: {
+      if (modalidad != null) 'modalidad': modalidad,
+      'plan': planPendiente,
+    });
+    return Map<String, dynamic>.from(resp.data as Map);
+  }
+
+  // Aliases conservadores
   Future<Map<String, dynamic>> listar({String? codCli, int page = 1, int pageSize = 20})
     => list(page: page, pageSize: pageSize, codCli: codCli);
   Future<Map<String, dynamic>> obtener(int id) => getById(id);

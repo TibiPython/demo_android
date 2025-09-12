@@ -1,91 +1,141 @@
-﻿from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
-from typing import List, Optional, Dict, Any, Literal, Annotated
-from pydantic import BaseModel, Field, field_validator, AliasChoices
-from pydantic.types import StringConstraints
-from datetime import date, timedelta, datetime
+﻿# backend/app/routers/prestamos.py
+# Router de préstamos: listado, obtener, crear (auto y manual), actualizar (auto / manual),
+# obtener plan completo, replan (editar solo pendientes y agregar cuotas).
+# Diseñado para NO romper compatibilidad con el frontend actual.
+
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+from typing import List, Literal, Optional, Dict, Any
+
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from pydantic import BaseModel, Field, AliasChoices, field_validator
+
 from app.deps import get_conn
-from app.notifications import send_loan_created_email  # ⬅️ NUEVO
+
+# Intentamos importar notificaciones; si no existe, continuamos sin romper.
+try:
+    from app.notifications import send_loan_created_email  # (prestamo_dict, cuotas_list)
+except Exception:  # pragma: no cover
+    def send_loan_created_email(*args, **kwargs):
+        pass  # no-op si el módulo no está disponible
+
 
 router = APIRouter()
 
-# -------- util --------
+
+# ----------------------------- Utilidades internas ----------------------------- #
+
 def _table_exists(conn, name: str) -> bool:
-    r = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (name,)
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
+        (name,)
     ).fetchone()
-    return r is not None
+    return bool(row)
+
 
 def _cols(conn, table: str) -> List[str]:
     return [r["name"] for r in conn.execute(f"PRAGMA table_info({table});").fetchall()]
 
-def _pick(cand: List[str], cols: List[str]) -> Optional[str]:
-    s = set(cols)
-    for c in cand:
-        if c in s:
+
+def _pick(cands: List[str], cols: List[str]) -> Optional[str]:
+    for c in cands:
+        if c in cols:
             return c
     return None
 
+
 def _add_months(d: date, months: int) -> date:
+    from calendar import monthrange
     y = d.year + (d.month - 1 + months) // 12
     m = (d.month - 1 + months) % 12 + 1
-    dim = [31, 29 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 28,
-           31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
-    day = min(d.day, dim)
-    return date(y, m, day)
+    last = monthrange(y, m)[1]
+    return date(y, m, min(d.day, last))
 
-def _cuota_row_to_dict(row, cols_q: List[str]) -> Dict[str, Any]:
-    num_col   = "cuota_numero" if "cuota_numero" in cols_q else _pick(["numero"], cols_q) or "cuota_numero"
-    fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else _pick(["fecha","vencimiento"], cols_q) or "fecha_vencimiento"
-    iap_col   = _pick(["interes_a_pagar","interes_calculado","interes"], cols_q) or "interes_a_pagar"
-    ipg_col   = _pick(["interes_pagado","interes_pagado_acum"], cols_q) or "interes_pagado"
-    est_col   = _pick(["estado","estatus"], cols_q) or "estado"
-    return {
-        "id": row["id"],
-        "numero": row[num_col],
-        "fecha_vencimiento": row[fecha_col],
-        "interes_a_pagar": float(row[iap_col]) if row[iap_col] is not None else 0.0,
-        "interes_pagado": float(row[ipg_col]) if row[ipg_col] is not None else 0.0,
-        "estado": row[est_col] or "PENDIENTE",
+
+def _ensure_plan_columns(conn) -> None:
+    # prestamos.plan_mode
+    if _table_exists(conn, "prestamos"):
+        cols_p = _cols(conn, "prestamos")
+        if "plan_mode" not in cols_p:
+            try:
+                conn.execute("ALTER TABLE prestamos ADD COLUMN plan_mode TEXT DEFAULT 'auto';")
+                conn.commit()
+            except Exception:
+                pass
+    # cuotas: columnas *_plan (para rastrear plan manual)
+    if _table_exists(conn, "cuotas"):
+        cols_q = _cols(conn, "cuotas")
+        changed = False
+        for colname, coltype in [
+            ("capital_plan", "REAL NOT NULL DEFAULT 0"),
+            ("interes_plan", "REAL NOT NULL DEFAULT 0"),
+            ("total_plan",   "REAL NOT NULL DEFAULT 0"),
+        ]:
+            if colname not in cols_q:
+                try:
+                    conn.execute(f"ALTER TABLE cuotas ADD COLUMN {colname} {coltype};")
+                    changed = True
+                except Exception:
+                    pass
+        if changed:
+            try:
+                conn.commit()
+            except Exception:
+                pass
+
+
+def _prestamo_to_front(conn, p_row) -> Dict[str, Any]:
+    # Une préstamo + cliente al shape esperado por el frontend.
+    out = {
+        "id": p_row["id"],
+        "monto": p_row["importe_credito"],
+        "modalidad": p_row["modalidad"],
+        "fecha_inicio": p_row["fecha_credito"],
+        "num_cuotas": p_row["num_cuotas"],
+        "tasa_interes": p_row["tasa_interes"],
+        "estado": p_row["estado"] if "estado" in p_row.keys() else "PENDIENTE",
     }
-
-def _prestamo_item_row_to_dict(row) -> Dict[str, Any]:
-    d = {
-        "id": row["id"],
-        "monto": row["monto"],
-        "modalidad": row["modalidad"],
-        "fecha_inicio": row["fecha_inicio"],
-        "num_cuotas": row["num_cuotas"],
-        "tasa_interes": row["tasa_interes"],
-        "estado": row["estado"] if "estado" in row.keys() else "PENDIENTE",
-        "cliente": {"id": None, "codigo": None, "nombre": None},
+    c = conn.execute(
+        "SELECT id, codigo, nombre FROM clientes WHERE codigo = ?;",
+        (p_row["cod_cli"],)
+    ).fetchone()
+    out["cliente"] = {
+        "id": c["id"] if c else None,
+        "codigo": c["codigo"] if c else p_row["cod_cli"],
+        "nombre": c["nombre"] if c else "",
     }
-    if "cliente_id" in row.keys():
-        d["cliente"]["id"] = row["cliente_id"]
-    if "cliente_codigo" in row.keys():
-        d["cliente"]["codigo"] = row["cliente_codigo"]
-    if "cliente_nombre" in row.keys():
-        d["cliente"]["nombre"] = row["cliente_nombre"]
-    if "p_cod_cli" in row.keys() and d["cliente"]["codigo"] is None:
-        d["cliente"]["codigo"] = row["p_cod_cli"]
-    return d
+    return out
 
-# -------- modelos --------
-class PrestamoIn(BaseModel):
-    cod_cli: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-    importe_credito: Annotated[float, Field(gt=0, validation_alias=AliasChoices("importe_credito", "monto"))]
-    tasa_interes:   Annotated[float, Field(ge=0, validation_alias=AliasChoices("tasa_interes", "tasa"))]
+
+def _calc_due(fecha_inicio: date, modalidad: str, n: int) -> date:
+    if modalidad == "Mensual":
+        return _add_months(fecha_inicio, n)
+    return fecha_inicio + timedelta(days=15 * n)
+
+
+def _capital_pendiente(conn, prestamo_id: int, monto_total: float) -> float:
+    cols_q = _cols(conn, "cuotas")
+    has_abcap = "abono_capital" in cols_q
+    if not has_abcap:
+        return round(monto_total, 2)
+    fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+    row = conn.execute(
+        f"SELECT COALESCE(SUM(COALESCE(abono_capital,0)),0) AS s FROM cuotas WHERE {fk}=?;",
+        (prestamo_id,)
+    ).fetchone()
+    return round(monto_total - float(row["s"]), 2)
+
+
+# ----------------------------- Modelos Pydantic ----------------------------- #
+
+class PrestamoCreateIn(BaseModel):
+    cod_cli: str = Field(min_length=1, validation_alias=AliasChoices("cod_cli", "codigo"))
+    monto: float = Field(gt=0, validation_alias=AliasChoices("monto", "importe_credito"))
     modalidad: Literal["Mensual", "Quincenal"]
-    numero_cuotas:  Annotated[int, Field(gt=0, validation_alias=AliasChoices("numero_cuotas", "num_cuotas"))]
-    fecha_inicio:   Annotated[date, Field(validation_alias=AliasChoices("fecha_inicio", "fecha_credito"))]
-
-    @field_validator("cod_cli", mode="before")
-    @classmethod
-    def _trim_code(cls, v):
-        if isinstance(v, str):
-            v = v.strip()
-        if not v:
-            raise ValueError("cod_cli requerido")
-        return v
+    fecha_inicio: date = Field(validation_alias=AliasChoices("fecha_inicio", "fecha_credito"))
+    num_cuotas: int = Field(gt=0, validation_alias=AliasChoices("num_cuotas", "numero_cuotas"))
+    tasa_interes: float = Field(ge=0)
 
     @field_validator("modalidad", mode="before")
     @classmethod
@@ -98,271 +148,605 @@ class PrestamoIn(BaseModel):
                 return "Quincenal"
         return v
 
-# -------- GET /prestamos --------
+
+class _CuotaPlanIn(BaseModel):
+    capital: float = Field(ge=0)
+    interes: float = Field(ge=0)
+
+
+class PrestamoManualIn(BaseModel):
+    cod_cli: str = Field(min_length=1, validation_alias=AliasChoices("cod_cli", "codigo"))
+    monto: float = Field(gt=0, validation_alias=AliasChoices("monto", "importe_credito"))
+    modalidad: Literal["Mensual", "Quincenal"]
+    fecha_inicio: date = Field(validation_alias=AliasChoices("fecha_inicio", "fecha_credito"))
+    num_cuotas: int = Field(gt=0, validation_alias=AliasChoices("num_cuotas", "numero_cuotas"))
+    tasa: float = Field(ge=0)
+    plan: List[_CuotaPlanIn]
+
+    @field_validator("modalidad", mode="before")
+    @classmethod
+    def _norm_modalidad(cls, v):
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s.startswith("men"):
+                return "Mensual"
+            if s.startswith("quin"):
+                return "Quincenal"
+        return v
+
+    @field_validator("plan")
+    @classmethod
+    def _len_match(cls, v, info):
+        n = info.data.get("num_cuotas")
+        if n and len(v) != n:
+            raise ValueError(f"El plan debe tener exactamente {n} cuotas")
+        return v
+
+
+class PrestamoAutoUpdateIn(BaseModel):
+    cod_cli: str = Field(min_length=1, validation_alias=AliasChoices("cod_cli", "codigo"))
+    monto: float = Field(gt=0, validation_alias=AliasChoices("monto", "importe_credito"))
+    tasa_interes: float = Field(ge=0, validation_alias=AliasChoices("tasa_interes", "tasa"))
+    modalidad: Literal["Mensual", "Quincenal"]
+    num_cuotas: int = Field(gt=0, validation_alias=AliasChoices("num_cuotas", "numero_cuotas"))
+    fecha_inicio: date = Field(validation_alias=AliasChoices("fecha_inicio", "fecha_credito"))
+
+    @field_validator("modalidad", mode="before")
+    @classmethod
+    def _norm_modalidad(cls, v):
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s.startswith("men"):
+                return "Mensual"
+            if s.startswith("quin"):
+                return "Quincenal"
+        return v
+
+
+class PrestamoReplanIn(BaseModel):
+    modalidad: Optional[Literal["Mensual", "Quincenal"]] = None
+    plan: List[_CuotaPlanIn]
+
+    @field_validator("modalidad", mode="before")
+    @classmethod
+    def _norm_modalidad(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s.startswith("men"):
+                return "Mensual"
+            if s.startswith("quin"):
+                return "Quincenal"
+        return v
+
+
+# -------------------------------- Endpoints --------------------------------- #
+
 @router.get("")
-@router.get("/", include_in_schema=False)
 def listar_prestamos(
-    cod_cli: Optional[str] = Query(default=None, description="Filtra por código de cliente"),
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=500),
+    cod_cli: Optional[str] = Query(None)
 ):
+    """Listado para la lista principal del frontend."""
     with get_conn() as conn:
         if not _table_exists(conn, "prestamos"):
             return {"total": 0, "items": []}
 
-        has_clientes = _table_exists(conn, "clientes")
-        has_cuotas = _table_exists(conn, "cuotas")
-
-        cols_p = _cols(conn, "prestamos")
-        cols_c = _cols(conn, "clientes") if has_clientes else []
-        cols_q = _cols(conn, "cuotas") if has_cuotas else []
-
-        can_join_by_code = ("cod_cli" in cols_p) and ("codigo" in cols_c)
-        join_cond = "p.cod_cli = c.codigo" if (has_clientes and can_join_by_code) else None
-        do_join = join_cond is not None
-
-        where_parts: List[str] = []
+        where = []
         params: List[Any] = []
-        if cod_cli and cod_cli.strip():
-            cod_cli = cod_cli.strip()
-            if do_join:
-                where_parts.append("c.codigo LIKE ?")
-                params.append(f"%{cod_cli}%")
-            elif "cod_cli" in cols_p:
-                where_parts.append("p.cod_cli LIKE ?")
-                params.append(f"%{cod_cli}%")
-        where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        if cod_cli:
+            where.append("p.cod_cli = ?")
+            params.append(cod_cli.strip())
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
-        # ---- SELECT base (alias hacia el front)
-        select_cols = (
-            "p.id, p.importe_credito AS monto, p.modalidad, "
-            "p.fecha_credito AS fecha_inicio, p.num_cuotas, p.tasa_interes"
-        )
-        if do_join:
-            select_cols += ", c.id AS cliente_id, c.codigo AS cliente_codigo, c.nombre AS cliente_nombre"
-        else:
-            select_cols += ", p.cod_cli AS p_cod_cli"
+        total = conn.execute(f"SELECT COUNT(*) AS c FROM prestamos p {where_sql};", params).fetchone()["c"]
 
-        # ---- Estado calculado también en la lista
-        estado_sql = "'PENDIENTE' AS estado"
-        if has_cuotas:
-            fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
-            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else _pick(["fecha","vencimiento"], cols_q) or "fecha_vencimiento"
-            estado_sql = f"""
-            CASE
-              WHEN EXISTS (SELECT 1 FROM cuotas q WHERE q.{fk_q}=p.id)
-                   AND NOT EXISTS (SELECT 1 FROM cuotas q WHERE q.{fk_q}=p.id AND UPPER(COALESCE(q.estado,''))<>'PAGADO')
-                THEN 'PAGADO'
-              WHEN EXISTS (SELECT 1 FROM cuotas q 
-                           WHERE q.{fk_q}=p.id 
-                             AND UPPER(COALESCE(q.estado,''))<>'PAGADO' 
-                             AND DATE(q.{fecha_col}) < DATE('now'))
-                THEN 'VENCIDO'
-              ELSE 'PENDIENTE'
-            END AS estado
-            """
-        select_cols = f"{select_cols}, {estado_sql}"
+        rows = conn.execute(
+            f"""
+            SELECT p.*
+              FROM prestamos p
+            {where_sql}
+            ORDER BY p.id DESC
+            LIMIT ? OFFSET ?;
+            """,
+            (*params, page_size, (page - 1) * page_size)
+        ).fetchall()
 
-        # ---- total
-        if do_join:
-            q_total = f"SELECT COUNT(*) AS c FROM prestamos p JOIN clientes c ON {join_cond}{where_sql};"
-        else:
-            q_total = f"SELECT COUNT(*) AS c FROM prestamos p{where_sql};"
-        total = conn.execute(q_total, tuple(params)).fetchone()["c"]
-
-        # ---- query paginada
-        if do_join:
-            q = f"SELECT {select_cols} FROM prestamos p JOIN clientes c ON {join_cond}{where_sql} ORDER BY p.id DESC LIMIT ? OFFSET ?;"
-        else:
-            q = f"SELECT {select_cols} FROM prestamos p{where_sql} ORDER BY p.id DESC LIMIT ? OFFSET ?;"
-
-        rows = conn.execute(q, tuple(params + [page_size, (page - 1) * page_size])).fetchall()
-        items = [_prestamo_item_row_to_dict(r) for r in rows]
+        items = [_prestamo_to_front(conn, r) for r in rows]
         return {"total": total, "items": items}
 
-# -------- GET /prestamos/{id} --------
-@router.get("/{id}")
-def obtener_prestamo(id: int):
+
+@router.get("/{prestamo_id}")
+def obtener_prestamo(prestamo_id: int):
     with get_conn() as conn:
-        if not _table_exists(conn, "prestamos"):
-            raise HTTPException(status_code=404, detail="No existe tabla 'prestamos'")
-
-        has_clientes = _table_exists(conn, "clientes")
-        cols_p = _cols(conn, "prestamos")
-        cols_c = _cols(conn, "clientes") if has_clientes else []
-
-        can_join_by_code = ("cod_cli" in cols_p) and ("codigo" in cols_c)
-        join_cond = "p.cod_cli = c.codigo" if (has_clientes and can_join_by_code) else None
-        do_join = join_cond is not None
-
-        select_cols = (
-            "p.id, p.importe_credito AS monto, p.modalidad, "
-            "p.fecha_credito AS fecha_inicio, p.num_cuotas, p.tasa_interes"
-        )
-        if do_join:
-            select_cols += ", c.id AS cliente_id, c.codigo AS cliente_codigo, c.nombre AS cliente_nombre"
-
-        if do_join:
-            q = f"SELECT {select_cols} FROM prestamos p JOIN clientes c ON {join_cond} WHERE p.id = ?;"
-        else:
-            q = f"SELECT {select_cols}, p.cod_cli AS p_cod_cli FROM prestamos p WHERE p.id = ?;"
-
-        row = conn.execute(q, (id,)).fetchone()
-        if not row:
+        p = conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
+        if not p:
             raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+        return _prestamo_to_front(conn, p)
 
-        out = _prestamo_item_row_to_dict(row)
 
-        # completar cliente si no hubo JOIN
-        if not do_join and has_clientes and out["cliente"]["codigo"]:
-            cli = conn.execute(
-                "SELECT id, codigo, nombre FROM clientes WHERE codigo=?;",
-                (out["cliente"]["codigo"],),
-            ).fetchone()
-            if cli:
-                out["cliente"] = {"id": cli["id"], "codigo": cli["codigo"], "nombre": cli["nombre"]}
-
-        # cuotas
-        cuotas: List[Dict[str, Any]] = []
-        if _table_exists(conn, "cuotas"):
-            cols_q = _cols(conn, "cuotas")
-            fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
-            num_col = "cuota_numero" if "cuota_numero" in cols_q else "numero"
-            rows_q = conn.execute(
-                f"SELECT * FROM cuotas WHERE {fk_q}=? ORDER BY {num_col} ASC;", (id,)
-            ).fetchall()
-            cuotas = [_cuota_row_to_dict(r, cols_q) for r in rows_q]
-
-        # estado
-        estado = "PENDIENTE"
-        try:
-            todas_pagadas = bool(cuotas) and all(str(c.get("estado","")).upper()=="PAGADO" for c in cuotas)
-            vencido = False
-            hoy = date.today()
-            for c in cuotas:
-                if str(c.get("estado","")).upper()=="PAGADO": 
-                    continue
-                fv_raw = c.get("fecha_vencimiento")
-                if isinstance(fv_raw, str) and datetime.fromisoformat(fv_raw).date() < hoy:
-                    vencido = True
-                    break
-            if todas_pagadas:
-                estado = "PAGADO"
-            elif vencido:
-                estado = "VENCIDO"
-        except Exception:
-            estado = "PENDIENTE"
-
-        return {
-            "id": out["id"],
-            "cliente": out["cliente"],
-            "monto": out["monto"],
-            "modalidad": out["modalidad"],
-            "fecha_inicio": out["fecha_inicio"],
-            "num_cuotas": out["num_cuotas"],
-            "tasa_interes": out["tasa_interes"],
-            "estado": estado,
-            "cuotas": cuotas,
-        }
-
-# -------- POST /prestamos --------
 @router.post("")
-@router.post("/", include_in_schema=False)
-def crear_prestamo(data: PrestamoIn, background_tasks: BackgroundTasks):
+def crear_prestamo_auto(data: PrestamoCreateIn, bg: BackgroundTasks):
+    """Crea préstamo AUTOMÁTICO (interés fijo por período; capital flexible)."""
     with get_conn() as conn:
-        if not _table_exists(conn, "prestamos"):
-            raise HTTPException(status_code=500, detail="No existe tabla 'prestamos'")
-        if not _table_exists(conn, "clientes"):
-            raise HTTPException(status_code=400, detail="No existe tabla 'clientes'")
+        _ensure_plan_columns(conn)
 
-        cli = conn.execute(
-            "SELECT id, codigo, nombre FROM clientes WHERE codigo=?;",
-            (data.cod_cli.strip(),)
-        ).fetchone()
-        if not cli:
-            raise HTTPException(status_code=404, detail="Cliente no encontrado")
-
-        mod = "Mensual" if data.modalidad.strip().lower().startswith("mensual") else "Quincenal"
-
+        # Insert cabecera
         cur = conn.execute(
-            "INSERT INTO prestamos (cod_cli, importe_credito, modalidad, fecha_credito, num_cuotas, tasa_interes) "
-            "VALUES (?, ?, ?, ?, ?, ?);",
-            (
-                data.cod_cli.strip(),
-                float(data.importe_credito),
-                mod,
-                data.fecha_inicio.isoformat(),
-                int(data.numero_cuotas),
-                float(data.tasa_interes),
-            ),
+            "INSERT INTO prestamos (cod_cli, importe_credito, modalidad, fecha_credito, num_cuotas, tasa_interes, plan_mode, estado) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'auto', 'PENDIENTE');",
+            (data.cod_cli.strip(), float(data.monto), data.modalidad, data.fecha_inicio.isoformat(),
+             int(data.num_cuotas), float(data.tasa_interes))
         )
         prestamo_id = cur.lastrowid
 
+        # Insert cuotas
+        cols_q = _cols(conn, "cuotas") if _table_exists(conn, "cuotas") else []
+        if cols_q:
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+            iap_col = _pick(["interes_a_pagar", "interes"], cols_q) or "interes_a_pagar"
+            has_ipg = "interes_pagado" in cols_q
+            has_capital = "capital" in cols_q
+            has_total = "total" in cols_q
+
+            i_per = round(float(data.monto) * (float(data.tasa_interes) / 100.0), 2)
+            for i in range(1, int(data.num_cuotas) + 1):
+                fields = [fk, num, fecha_col, iap_col, "estado"]
+                values = [prestamo_id, i, _calc_due(data.fecha_inicio, data.modalidad, i).isoformat(), i_per, "PENDIENTE"]
+                if has_ipg:
+                    fields += ["interes_pagado"]; values += [0.0]
+                if has_capital:
+                    fields += ["capital"]; values += [0.0]
+                if has_total:
+                    fields += ["total"]; values += [i_per]
+                sql = f"INSERT INTO cuotas ({', '.join(fields)}) VALUES ({', '.join(['?'] * len(values))});"
+                conn.execute(sql, values)
+
+        conn.commit()
+
+        # Respuesta + email en background
+        res = _prestamo_to_front(conn, conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone())
+        # Construimos un resumen de cuotas para el correo
+        cuotas = []
         if _table_exists(conn, "cuotas"):
             cols_q = _cols(conn, "cuotas")
-            fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
-            num_col = "cuota_numero" if "cuota_numero" in cols_q else "numero"
-            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else "fecha"
-
-            tasa_cuota = float(data.tasa_interes) if mod == "Mensual" else float(data.tasa_interes) / 2.0
-            interes_por_cuota = round(float(data.importe_credito) * (tasa_cuota / 100.0), 2)
-
-            for i in range(1, data.numero_cuotas + 1):
-                if mod == "Mensual":
-                    fven = _add_months(data.fecha_inicio, i)
-                else:
-                    fven = data.fecha_inicio + timedelta(days=15 * i)
-
-                conn.execute(
-                    f"INSERT INTO cuotas ({fk_q}, {num_col}, {fecha_col}, interes_a_pagar, interes_pagado, estado) "
-                    "VALUES (?, ?, ?, ?, ?, ?);",
-                    (prestamo_id, i, fven.isoformat(), interes_por_cuota, 0.0, "PENDIENTE"),
-                )
-
-        row = conn.execute(
-            "SELECT p.id, p.importe_credito AS monto, p.modalidad, p.fecha_credito AS fecha_inicio, "
-            "p.num_cuotas, p.tasa_interes, c.id AS cliente_id, c.codigo AS cliente_codigo, c.nombre AS cliente_nombre "
-            "FROM prestamos p JOIN clientes c ON p.cod_cli = c.codigo WHERE p.id=?;",
-            (prestamo_id,),
-        ).fetchone()
-
-        if not row:
-            raise HTTPException(status_code=500, detail="Error al recuperar el préstamo recién creado")
-
-        cuotas: List[Dict[str, Any]] = []
-        if _table_exists(conn, "cuotas"):
-            cols_q = _cols(conn, "cuotas")
-            fk_q = _pick(["id_prestamo","prestamo_id"], cols_q) or "id_prestamo"
-            num_col = "cuota_numero" if "cuota_numero" in cols_q else "numero"
-            rows_q = conn.execute(
-                f"SELECT * FROM cuotas WHERE {fk_q}=? ORDER BY {num_col} ASC;", (prestamo_id,)
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+            iap_col = _pick(["interes_a_pagar", "interes"], cols_q) or "interes_a_pagar"
+            rows = conn.execute(
+                f"SELECT {num} AS numero, {fecha_col} AS fecha, {iap_col} AS interes FROM cuotas WHERE {fk}=? ORDER BY {num};",
+                (prestamo_id,)
             ).fetchall()
-            cuotas = [_cuota_row_to_dict(r, cols_q) for r in rows_q]
+            cuotas = [{"numero": r["numero"], "fecha": r["fecha"], "interes": float(r["interes"])} for r in rows]
 
-        # ⬇️ Construimos respuesta antes de cerrar/commit
-        resp = {
-            "id": row["id"],
-            "cliente": {"id": row["cliente_id"], "codigo": row["cliente_codigo"], "nombre": row["cliente_nombre"]},
-            "monto": row["monto"],
-            "modalidad": row["modalidad"],
-            "fecha_inicio": row["fecha_inicio"],
-            "num_cuotas": row["num_cuotas"],
-            "tasa_interes": row["tasa_interes"],
-            "estado": "PENDIENTE",
-            "cuotas": cuotas,
+        try:
+            bg.add_task(send_loan_created_email, res, cuotas)
+        except Exception:
+            pass
+
+        # El frontend de "new_loan_page" espera también las cuotas de respuesta
+        res["cuotas"] = [
+            {"id": None, "numero": c["numero"], "fecha_vencimiento": c["fecha"], "interes_a_pagar": c["interes"],
+             "interes_pagado": 0.0, "estado": "PENDIENTE"}
+            for c in cuotas
+        ]
+        return res
+
+
+@router.post("/manual")
+def crear_prestamo_manual(data: PrestamoManualIn, bg: BackgroundTasks):
+    """Crea préstamo MANUAL con plan completo (capital+interés por cuota)."""
+    tol = 0.01
+    plan_capital = round(sum(float(x.capital) for x in data.plan), 2)
+    monto = round(float(data.monto), 2)
+    if abs(monto - plan_capital) > tol:
+        diff = round(monto - plan_capital, 2)
+        raise HTTPException(status_code=400, detail=f"La suma de capital del plan debe ser {monto:.2f}. Actual: {plan_capital:.2f} (diff {diff:+.2f})")
+
+    with get_conn() as conn:
+        _ensure_plan_columns(conn)
+        # Inserta cabecera
+        cur = conn.execute(
+            "INSERT INTO prestamos (cod_cli, importe_credito, modalidad, fecha_credito, num_cuotas, tasa_interes, plan_mode, estado) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'manual', 'PENDIENTE');",
+            (data.cod_cli.strip(), float(data.monto), data.modalidad, data.fecha_inicio.isoformat(),
+             int(data.num_cuotas), float(data.tasa))
+        )
+        prestamo_id = cur.lastrowid
+
+        # Inserta cuotas manuales
+        cols_q = _cols(conn, "cuotas") if _table_exists(conn, "cuotas") else []
+        if cols_q:
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+            iap_col = _pick(["interes_a_pagar", "interes"], cols_q) or "interes_a_pagar"
+            has_ipg = "interes_pagado" in cols_q
+            has_capital = "capital" in cols_q
+            has_total = "total" in cols_q
+
+            for i, c in enumerate(data.plan, start=1):
+                fv = _calc_due(data.fecha_inicio, data.modalidad, i).isoformat()
+                fields = [fk, num, fecha_col, iap_col, "estado"]
+                values = [prestamo_id, i, fv, float(c.interes), "PENDIENTE"]
+                if has_ipg:
+                    fields += ["interes_pagado"]; values += [0.0]
+                # Guardamos el plan manual
+                cols_q2 = _cols(conn, "cuotas")
+                if "capital_plan" in cols_q2:
+                    fields += ["capital_plan"]; values += [float(c.capital)]
+                if "interes_plan" in cols_q2:
+                    fields += ["interes_plan"]; values += [float(c.interes)]
+                if "total_plan" in cols_q2:
+                    fields += ["total_plan"]; values += [round(float(c.capital) + float(c.interes), 2)]
+                # Compatibilidad UI
+                if has_capital:
+                    fields += ["capital"]; values += [float(c.capital)]
+                if has_total:
+                    fields += ["total"]; values += [round(float(c.capital) + float(c.interes), 2)]
+
+                sql = f"INSERT INTO cuotas ({', '.join(fields)}) VALUES ({', '.join(['?'] * len(values))});"
+                conn.execute(sql, values)
+
+        conn.commit()
+
+        res = _prestamo_to_front(conn, conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone())
+        cuotas = []
+        if _table_exists(conn, "cuotas"):
+            cols_q = _cols(conn, "cuotas")
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+            iap_col = _pick(["interes_a_pagar", "interes"], cols_q) or "interes_a_pagar"
+            rows = conn.execute(
+                f"SELECT {num} AS numero, {fecha_col} AS fecha, {iap_col} AS interes FROM cuotas WHERE {fk}=? ORDER BY {num};",
+                (prestamo_id,)
+            ).fetchall()
+            cuotas = [{"numero": r["numero"], "fecha": r["fecha"], "interes": float(r["interes"])} for r in rows]
+
+        try:
+            bg.add_task(send_loan_created_email, res, cuotas)
+        except Exception:
+            pass
+
+        res["cuotas"] = [
+            {"id": None, "numero": c["numero"], "fecha_vencimiento": c["fecha"], "interes_a_pagar": c["interes"],
+             "interes_pagado": 0.0, "estado": "PENDIENTE"}
+            for c in cuotas
+        ]
+        return res
+
+
+@router.put("/{prestamo_id}")
+def actualizar_prestamo_automatico(prestamo_id: int, data: PrestamoAutoUpdateIn):
+    """
+    Actualiza cabecera de un préstamo AUTOMÁTICO y regenera cuotas.
+    Prohibido si plan_mode == 'manual', si hay pagos o si está PAGADO.
+    """
+    with get_conn() as conn:
+        if not _table_exists(conn, "prestamos"):
+            raise HTTPException(status_code=500, detail="No existe tabla 'prestamos'")
+        p = conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
+        if not p:
+            raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+
+        plan_mode = p["plan_mode"] if "plan_mode" in p.keys() else "auto"
+        estado = p["estado"] if "estado" in p.keys() else "PENDIENTE"
+        if plan_mode == "manual":
+            raise HTTPException(status_code=400, detail="Este préstamo es manual; usa PUT /prestamos/{id}/manual")
+        if estado == "PAGADO":
+            raise HTTPException(status_code=400, detail="No se puede editar un préstamo ya pagado")
+
+        # Bloquear si hay pagos
+        if _table_exists(conn, "cuotas"):
+            cols_q = _cols(conn, "cuotas")
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            q = conn.execute(
+                f"SELECT COUNT(*) AS c FROM cuotas WHERE {fk}=? AND (estado='PAGADO' OR COALESCE(interes_pagado,0)>0 OR COALESCE(abono_capital,0)>0);",
+                (prestamo_id,)
+            ).fetchone()
+            if int(q["c"] or 0) > 0:
+                raise HTTPException(status_code=400, detail="No se puede editar: hay cuotas con pagos registrados")
+
+        # Actualizar cabecera
+        conn.execute(
+            "UPDATE prestamos SET cod_cli=?, importe_credito=?, modalidad=?, fecha_credito=?, num_cuotas=?, tasa_interes=? WHERE id=?;",
+            (data.cod_cli.strip(), float(data.monto), data.modalidad, data.fecha_inicio.isoformat(),
+             int(data.num_cuotas), float(data.tasa_interes), prestamo_id)
+        )
+
+        # Regenerar cuotas
+        if _table_exists(conn, "cuotas"):
+            cols_q = _cols(conn, "cuotas")
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+            iap_col = _pick(["interes_a_pagar", "interes"], cols_q) or "interes_a_pagar"
+            has_ipg = "interes_pagado" in cols_q
+            has_capital = "capital" in cols_q
+            has_total = "total" in cols_q
+
+            conn.execute(f"DELETE FROM cuotas WHERE {fk}=?;", (prestamo_id,))
+
+            i_per = round(float(data.monto) * (float(data.tasa_interes) / 100.0), 2)
+            for i in range(1, int(data.num_cuotas) + 1):
+                fv = _calc_due(data.fecha_inicio, data.modalidad, i).isoformat()
+                fields = [fk, num, fecha_col, iap_col, "estado"]
+                values = [prestamo_id, i, fv, i_per, "PENDIENTE"]
+                if has_ipg:
+                    fields += ["interes_pagado"]; values += [0.0]
+                if has_capital:
+                    fields += ["capital"]; values += [0.0]
+                if has_total:
+                    fields += ["total"]; values += [i_per]
+                sql = f"INSERT INTO cuotas ({', '.join(fields)}) VALUES ({', '.join(['?'] * len(values))});"
+                conn.execute(sql, values)
+
+        conn.commit()
+
+        row = conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
+        return _prestamo_to_front(conn, row)
+
+
+
+@router.put("/{prestamo_id}/manual")
+def actualizar_prestamo_manual(prestamo_id: int, data: PrestamoManualIn):
+    """Actualiza cabecera + plan de un préstamo MANUAL, solo si no hay pagos."""
+    tol = 0.01
+    plan_capital = round(sum(float(x.capital) for x in data.plan), 2)
+    monto = round(float(data.monto), 2)
+    if abs(monto - plan_capital) > tol:
+        diff = round(monto - plan_capital, 2)
+        raise HTTPException(status_code=400, detail=f"La suma de capital del plan debe ser {monto:.2f}. Actual: {plan_capital:.2f} (diff {diff:+.2f})")
+
+    with get_conn() as conn:
+        p = conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
+        if not p:
+            raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+
+        plan_mode = p["plan_mode"] if "plan_mode" in p.keys() else "auto"
+        estado = p["estado"] if "estado" in p.keys() else "PENDIENTE"
+        if plan_mode != "manual":
+            raise HTTPException(status_code=400, detail="Este préstamo no es de modo manual")
+        if estado == "PAGADO":
+            raise HTTPException(status_code=400, detail="No se puede editar un préstamo ya pagado")
+
+        # Bloquear si hay pagos
+        if _table_exists(conn, "cuotas"):
+            cols_q = _cols(conn, "cuotas")
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            q = conn.execute(
+                f"SELECT COUNT(*) AS c FROM cuotas WHERE {fk}=? AND (estado='PAGADO' OR COALESCE(interes_pagado,0)>0 OR COALESCE(abono_capital,0)>0);",
+                (prestamo_id,)
+            ).fetchone()
+            if int(q["c"] or 0) > 0:
+                raise HTTPException(status_code=400, detail="No se puede editar: hay cuotas con pagos registrados")
+
+        _ensure_plan_columns(conn)
+
+        # Actualizar cabecera
+        conn.execute(
+            "UPDATE prestamos SET cod_cli=?, importe_credito=?, modalidad=?, fecha_credito=?, num_cuotas=?, tasa_interes=? WHERE id=?;",
+            (data.cod_cli.strip(), float(data.monto), data.modalidad, data.fecha_inicio.isoformat(), int(data.num_cuotas), float(data.tasa), prestamo_id)
+        )
+
+        # Regenerar cuotas manuales
+        if _table_exists(conn, "cuotas"):
+            cols_q = _cols(conn, "cuotas")
+            fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+            num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+            fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+            iap_col = _pick(["interes_a_pagar", "interes"], cols_q) or "interes_a_pagar"
+            has_ipg = "interes_pagado" in cols_q
+            has_capital = "capital" in cols_q
+            has_total = "total" in cols_q
+
+            conn.execute(f"DELETE FROM cuotas WHERE {fk}=?;", (prestamo_id,))
+
+            for i, c in enumerate(data.plan, start=1):
+                fv = _calc_due(data.fecha_inicio, data.modalidad, i).isoformat()
+                fields = [fk, num, fecha_col, iap_col, "estado"]
+                values = [prestamo_id, i, fv, float(c.interes), "PENDIENTE"]
+                if has_ipg:
+                    fields += ["interes_pagado"]; values += [0.0]
+                cols_q2 = _cols(conn, "cuotas")
+                if "capital_plan" in cols_q2:
+                    fields += ["capital_plan"]; values += [float(c.capital)]
+                if "interes_plan" in cols_q2:
+                    fields += ["interes_plan"]; values += [float(c.interes)]
+                if "total_plan" in cols_q2:
+                    fields += ["total_plan"]; values += [round(float(c.capital) + float(c.interes), 2)]
+                if has_capital:
+                    fields += ["capital"]; values += [float(c.capital)]
+                if has_total:
+                    fields += ["total"]; values += [round(float(c.capital) + float(c.interes), 2)]
+                sql = f"INSERT INTO cuotas ({', '.join(fields)}) VALUES ({', '.join(['?'] * len(values))});"
+                conn.execute(sql, values)
+
+        conn.commit()
+        row = conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
+        return _prestamo_to_front(conn, row)
+
+
+@router.get("/{prestamo_id}/plan")
+def obtener_plan_prestamo(prestamo_id: int):
+    """
+    Devuelve cabecera y plan completo, marcando cuotas editables vs pagadas
+    y el índice de la última cuota con pagos (last_paid_num).
+    """
+    with get_conn() as conn:
+        if not _table_exists(conn, "prestamos"):
+            raise HTTPException(status_code=500, detail="No existe tabla 'prestamos'")
+        p = conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
+        if not p:
+            raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+
+        plan_mode = p["plan_mode"] if "plan_mode" in p.keys() else "auto"
+        out = {
+            "id": p["id"],
+            "cod_cli": p["cod_cli"],
+            "monto": p["importe_credito"],
+            "modalidad": p["modalidad"],
+            "fecha_inicio": p["fecha_credito"],
+            "num_cuotas": p["num_cuotas"],
+            "tasa": p["tasa_interes"],
+            "plan_mode": plan_mode,
+            "estado": p["estado"] if "estado" in p.keys() else "PENDIENTE",
+            "plan": [],
+            "last_paid_num": 0,
         }
 
-        # ⬇️ Commit explícito para asegurar persistencia antes del email
-        try:
-            conn.commit()
-        except Exception:
-            pass
+        if not _table_exists(conn, "cuotas"):
+            return out
 
-        # ⬇️ Enviar correo en background (no bloquea la respuesta)
-        try:
-            background_tasks.add_task(send_loan_created_email, int(prestamo_id))
-        except Exception:
-            # Nunca romper el flujo por el envío
-            pass
+        cols_q = _cols(conn, "cuotas")
+        fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+        num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+        fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+        cap_src = "capital_plan" if "capital_plan" in cols_q else ("capital" if "capital" in cols_q else None)
+        int_src = "interes_plan" if "interes_plan" in cols_q else ("interes_a_pagar" if "interes_a_pagar" in cols_q else ("interes" if "interes" in cols_q else None))
+        has_ipg = "interes_pagado" in cols_q
+        has_abcap = "abono_capital" in cols_q
+        has_estado = "estado" in cols_q
 
-        return resp
+        rows = conn.execute(
+            f"SELECT * FROM cuotas WHERE {fk}=? ORDER BY {num} ASC;",
+            (prestamo_id,)
+        ).fetchall()
+
+        last_paid = 0
+        for r in rows:
+            numero = int(r[num])
+            estado = (r["estado"] if has_estado else "PENDIENTE") or "PENDIENTE"
+            ipg = float(r["interes_pagado"]) if has_ipg else 0.0
+            abcap = float(r["abono_capital"]) if has_abcap else 0.0
+            if estado == "PAGADO" or ipg > 0 or abcap > 0:
+                last_paid = max(last_paid, numero)
+            c = float(r[cap_src]) if cap_src else 0.0
+            i = float(r[int_src]) if int_src else 0.0
+            out["plan"].append({
+                "numero": numero,
+                "fecha": r[fecha_col],
+                "capital": c,
+                "interes": i,
+                "estado": estado,
+                "interes_pagado": ipg,
+                "abono_capital": abcap,
+                "editable": numero > last_paid
+            })
+
+        out["last_paid_num"] = last_paid
+        return out
+
+
+@router.put("/{prestamo_id}/replan")
+def replan_prestamo(prestamo_id: int, data: PrestamoReplanIn):
+    """
+    Reprograma las CUOTAS PENDIENTES a partir de la última cuota con pagos.
+    - Respeta cuotas ya pagadas (o con pagos).
+    - Reemplaza TODAS las pendientes por el plan dado y permite AGREGAR más.
+    - Valida que Σ(capital nuevo) == capital pendiente real (monto - Σ abonos ya registrados).
+    - Ajusta fechas continuando la periodicidad desde la última fecha base.
+    """
+    tol = 0.01
+    with get_conn() as conn:
+        if not _table_exists(conn, "prestamos"):
+            raise HTTPException(status_code=500, detail="No existe tabla 'prestamos'")
+        p = conn.execute("SELECT * FROM prestamos WHERE id=?", (prestamo_id,)).fetchone()
+        if not p:
+            raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+
+        _ensure_plan_columns(conn)
+
+        modalidad = data.modalidad or p["modalidad"]
+        monto_total = float(p["importe_credito"])
+        fecha_inicio = date.fromisoformat(p["fecha_credito"])
+        plan_mode = p["plan_mode"] if "plan_mode" in p.keys() else "auto"
+
+        if not _table_exists(conn, "cuotas"):
+            raise HTTPException(status_code=500, detail="No existe tabla 'cuotas'")
+
+        cols_q = _cols(conn, "cuotas")
+        fk = _pick(["id_prestamo", "prestamo_id"], cols_q) or "id_prestamo"
+        num = "cuota_numero" if "cuota_numero" in cols_q else ("numero" if "numero" in cols_q else "cuota_numero")
+        fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols_q else ("fecha" if "fecha" in cols_q else "fecha_vencimiento")
+        has_capital = "capital" in cols_q
+        has_total = "total" in cols_q
+        has_ipg = "interes_pagado" in cols_q
+        has_abcap = "abono_capital" in cols_q
+
+        # Detectar última cuota con pagos
+        rows = conn.execute(
+            f"SELECT * FROM cuotas WHERE {fk}=? ORDER BY {num} ASC;",
+            (prestamo_id,)
+        ).fetchall()
+        last_paid = 0
+        last_paid_fecha = fecha_inicio
+        for r in rows:
+            numero = int(r[num])
+            estado = (r["estado"] if "estado" in r.keys() else "PENDIENTE") or "PENDIENTE"
+            ipg = float(r["interes_pagado"]) if has_ipg else 0.0
+            abcap = float(r["abono_capital"]) if has_abcap else 0.0
+            if estado == "PAGADO" or ipg > 0 or abcap > 0:
+                last_paid = max(last_paid, numero)
+                try:
+                    last_paid_fecha = date.fromisoformat(r[fecha_col])
+                except Exception:
+                    pass
+
+        # Validar capital pendiente
+        capital_pendiente = _capital_pendiente(conn, prestamo_id, monto_total)
+        plan_capital = round(sum(float(x.capital) for x in data.plan), 2)
+        if abs(plan_capital - capital_pendiente) > tol:
+            diff = round(capital_pendiente - plan_capital, 2)
+            raise HTTPException(
+                status_code=400,
+                detail=f"El capital del nuevo plan debe ser {capital_pendiente:.2f}. Actual: {plan_capital:.2f} (diff {diff:+.2f})"
+            )
+
+        # Borrar cuotas pendientes y reinsertar según nuevo plan
+        conn.execute(f"DELETE FROM cuotas WHERE {fk}=? AND {num}>?;", (prestamo_id, last_paid))
+
+        def _next_fecha(base: date, k: int) -> date:
+            return _add_months(base, k) if modalidad == "Mensual" else base + timedelta(days=15 * k)
+
+        for i, c in enumerate(data.plan, start=1):
+            numero = last_paid + i
+            fv = _next_fecha(last_paid_fecha, i).isoformat()
+            fields = [fk, num, fecha_col, "estado", "interes_a_pagar"]
+            values = [prestamo_id, numero, fv, "PENDIENTE", float(c.interes)]
+            if has_ipg:
+                fields += ["interes_pagado"]; values += [0.0]
+            cols_q2 = _cols(conn, "cuotas")
+            if "capital_plan" in cols_q2:
+                fields += ["capital_plan"]; values += [float(c.capital)]
+            if "interes_plan" in cols_q2:
+                fields += ["interes_plan"]; values += [float(c.interes)]
+            if "total_plan" in cols_q2:
+                fields += ["total_plan"]; values += [round(float(c.capital) + float(c.interes), 2)]
+            if has_capital:
+                fields += ["capital"]; values += [float(c.capital)]
+            if has_total:
+                fields += ["total"]; values += [round(float(c.capital) + float(c.interes), 2)]
+            sql = f"INSERT INTO cuotas ({', '.join(fields)}) VALUES ({', '.join(['?'] * len(values))});"
+            conn.execute(sql, values)
+
+        # Actualizar num_cuotas total y modalidad (si cambió)
+        new_count = last_paid + len(data.plan)
+        conn.execute("UPDATE prestamos SET num_cuotas=?, modalidad=? WHERE id=?;", (new_count, modalidad, prestamo_id))
+
+        conn.commit()
+
+        return {
+            "id": prestamo_id,
+            "notice": f"Se regeneraron {len(data.plan)} cuotas a partir de la cuota {last_paid + 1}.",
+            "last_paid_num": last_paid,
+            "num_cuotas": new_count,
+            "plan_mode": plan_mode,
+            "modalidad": modalidad,
+        }

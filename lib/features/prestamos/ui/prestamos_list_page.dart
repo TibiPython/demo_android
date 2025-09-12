@@ -1,7 +1,7 @@
 // Pantalla principal de la lista de Préstamos (se importa desde main.dart).
-// Nota: aquí se muestra cada préstamo con Nombre, Estado, Código, Monto, Modalidad,
-// y la línea extra "Vence: …   •   Tasa: …%". Además se añadió "No. de cuotas".
-// El tap sobre un préstamo NO navega al detalle (detalle deshabilitado).
+// - FAB (+): SIEMPRE abre selector para crear préstamo Manual o Automático.
+// - Botón Editar por ítem (habilitado si el préstamo NO está PAGADO).
+// - Formato de moneda con símbolo adelante: $ 1.000.000,00
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,8 +9,11 @@ import 'package:intl/intl.dart';
 
 import '../../../core/http.dart';
 import '../loan_model.dart';
-import '../loan_new_page.dart';
+import '../loan_new_page.dart';            // creación automática (clásica)
+import '../loan_service.dart';
 import 'status_theme.dart';
+import 'loan_new_manual_page.dart';       // creación manual (nueva)
+import 'loan_edit_page.dart';             // edición/replan
 
 class PrestamosListPage extends ConsumerStatefulWidget {
   const PrestamosListPage({super.key});
@@ -34,26 +37,82 @@ class _PrestamosListPageState extends ConsumerState<PrestamosListPage> {
     return PrestamosResp.fromJson((res.data as Map).cast<String, dynamic>());
   }
 
-  Future<void> _openNew(BuildContext context) async {
+  Future<void> _openNewAuto(BuildContext context) async {
     final result = await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const LoanNewPage()),
     );
     if (result == true && mounted) {
-      setState(() => _future = _load()); // refrescar al volver
+      setState(() => _future = _load());
     }
+  }
+
+  Future<void> _openNewManual(BuildContext context) async {
+    final result = await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const LoanNewManualPage()),
+    );
+    if (result == true && mounted) {
+      setState(() => _future = _load());
+    }
+  }
+
+  Future<void> _openNewChooser(BuildContext context) async {
+    // Siempre mostrar el selector (sin 'recordar preferencia').
+    String selected = 'manual';
+    await showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setSt) {
+          return Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Crear préstamo', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                RadioListTile<String>(
+                  value: 'manual',
+                  groupValue: selected,
+                  onChanged: (v) => setSt(() => selected = v!),
+                  title: const Text('Manual (recomendado)'),
+                  subtitle: const Text('Editar capital e interés por cuota; cierre verificado en la última.'),
+                ),
+                RadioListTile<String>(
+                  value: 'auto',
+                  groupValue: selected,
+                  onChanged: (v) => setSt(() => selected = v!),
+                  title: const Text('Automático (clásico)'),
+                  subtitle: const Text('Interés fijo por período; capital flexible.'),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+                    const Spacer(),
+                    ElevatedButton(
+                      onPressed: () async {
+                        Navigator.pop(ctx);
+                        if (selected == 'manual') {
+                          await _openNewManual(context);
+                        } else {
+                          await _openNewAuto(context);
+                        }
+                      },
+                      child: const Text('Continuar'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+        });
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final fmt = NumberFormat.currency(locale: 'es_CO', symbol: r'$');
-
-String _pf(num? v) {
-  if (v == null) return '-';
-  final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v);
-  return '\$\u00A0' + s;
-}
-
-
+    final moneyFmt = NumberFormat.currency(locale: 'es_CO', symbol: r'$ ');
     return Scaffold(
       appBar: AppBar(title: const Text('Préstamos')),
       body: FutureBuilder<PrestamosResp>(
@@ -75,49 +134,36 @@ String _pf(num? v) {
             separatorBuilder: (_, __) => const Divider(height: 1),
             itemBuilder: (_, i) {
               final it = items[i];
-              final estado = it.estado; // viene del backend
+              final estado = it.estado;
               final nombre = (it.cliente['nombre'] ?? '').toString();
               final codigo = (it.cliente['codigo'] ?? '').toString();
-              final folio = 'P-${it.id.toString().padLeft(4, '0')}';
               final monto = it.monto;
 
-              // Calcular "Vence" (última cuota) a partir de fechaInicio + numCuotas y modalidad
+              // Estimar fecha de última cuota a partir de inicio + modalidad + n cuotas
               final dtFmt = DateFormat('yyyy-MM-dd');
               String venceTxt = '-';
-              final int numCuotas = (it.numCuotas ?? 0) as int; // <-- No. de cuotas
+              final int numCuotas = it.numCuotas;
               try {
-                final fiStr = (it.fechaInicio ?? '').toString();
-                if (fiStr.isNotEmpty) {
-                  final fi = DateTime.parse(fiStr);
-                  final mod = (it.modalidad ?? '').toString().toLowerCase();
-                  if (numCuotas > 0) {
-                    if (mod.startsWith('men')) {
-                      final v = DateTime(fi.year, fi.month + numCuotas, fi.day);
-                      venceTxt = dtFmt.format(v);
-                    } else {
-                      final v = fi.add(Duration(days: 15 * numCuotas));
-                      venceTxt = dtFmt.format(v);
-                    }
-                  }
+                final DateTime fi = it.fechaInicio;
+                if (it.modalidad == 'Mensual') {
+                  final last = DateTime(fi.year, fi.month + numCuotas, fi.day);
+                  venceTxt = dtFmt.format(last);
+                } else {
+                  final last = fi.add(Duration(days: 15 * numCuotas));
+                  venceTxt = dtFmt.format(last);
                 }
-              } catch (_) {}
+              } catch (_) {
+                venceTxt = '-';
+              }
 
-              // Tasa % (solo si es numérico para evitar errores de tipo)
-              final String tasaTxt = (() {
-                final t = it.tasaInteres;
-                if (t == null) return '';
-                if (t is num) return t.toStringAsFixed(2);
-                return ''; // ignorar otros tipos
-              })();
+              final tasaTxt = (it.tasaInteres).toString();
 
-              // SIN navegación al detalle (no onTap)
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                child: LoanTintedSection(
-                  estado: estado,
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+              return InkWell(
+                onTap: null, // detalle deshabilitado por ahora
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Row(
                         children: [
@@ -129,18 +175,31 @@ String _pf(num? v) {
                                   ),
                             ),
                           ),
+                          // Un solo botón Editar (para cualquier préstamo NO pagado)
+                          if ((estado ?? '') != 'PAGADO')
+                            IconButton(
+                              tooltip: 'Editar',
+                              icon: const Icon(Icons.edit),
+                              onPressed: () async {
+                                final result = await Navigator.of(context).push(
+                                  MaterialPageRoute(builder: (_) => LoanEditPage(prestamoId: it.id)),
+                                );
+                                if (result == true && mounted) {
+                                  setState(() => _future = _load());
+                                }
+                              },
+                            ),
                           LoanStatusBadge(estado: estado),
                         ],
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'Folio: $folio',
+                        'Código: $codigo',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: Colors.black.withOpacity(0.6),
                             ),
                       ),
                       const SizedBox(height: 4),
-                      // Línea con Vence y Tasa (lo demás queda igual)
                       Text(
                         'Vence: $venceTxt${tasaTxt.isEmpty ? '' : '   •   Tasa: $tasaTxt%'}',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -148,26 +207,12 @@ String _pf(num? v) {
                             ),
                       ),
                       const SizedBox(height: 4),
-                      // NUEVO: No. de cuotas (línea aparte, mismo estilo)
-                      Text(
-                        'No. de cuotas: $numCuotas',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: Colors.black.withOpacity(0.6),
-                            ),
-                      ),
-                      const SizedBox(height: 10),
                       Row(
                         children: [
-                          Expanded(
-                            child: Text(
-                              _pf(monto),
-                              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                            ),
-                          ),
-                          if ((it.modalidad).isNotEmpty)
-                            Text(it.modalidad, style: Theme.of(context).textTheme.titleSmall),
+                          const Text('Monto: ', style: TextStyle(fontWeight: FontWeight.w600)),
+                          Text(moneyFmt.format(monto)), // $ delante
+                          const Spacer(),
+                          Text('Cuotas: $numCuotas', style: Theme.of(context).textTheme.bodySmall),
                         ],
                       ),
                     ],
@@ -179,7 +224,7 @@ String _pf(num? v) {
         },
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => _openNew(context),
+        onPressed: () => _openNewChooser(context),
         child: const Icon(Icons.add),
       ),
     );
