@@ -7,13 +7,14 @@ import 'cuota_model.dart';
 import 'cuota_pago_dialog.dart';
 import 'abono_capital_dialog.dart';
 
+// ⬇️ NUEVO
+import 'package:demo_android/features/prestamos/refresh_bus.dart';
+
 String _pf(num? v) {
   if (v == null) return '-';
   final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v);
-  return '\$ ' + s;
+  return '\$ ' + s;
 }
-
-
 
 Future<bool?> showCuotasDetalleSheet(BuildContext context, {required int prestamoId}) {
   return showModalBottomSheet<bool>(
@@ -120,19 +121,15 @@ class CuotasDetalleSheet extends ConsumerWidget {
                   final diasMora = c.diasMora ?? 0;
 
                   return ListTile(
-                    // leading eliminado para no mostrar el ID/numero en un círculo
                     title: Text('Vence: $venc  ·  Estado: $estado  ·  Mora: ${diasMora}d'),
-                    subtitle: Text(
-                      'Interés a pagar: ${_pf(interes)}  ·  Pagado: ${_pf(pagado)}',
-                    ),
+                    subtitle: Text('Interés a pagar: ${_pf(interes)}  ·  Pagado: ${_pf(pagado)}'),
                     trailing: Wrap(
                       spacing: 8,
                       children: [
                         if (estado == 'PENDIENTE')
                           ElevatedButton(
                             onPressed: () async {
-                              final pr =
-                                  await showPagoCuotaDialog(context, sugerido: interes);
+                              final pr = await showPagoCuotaDialog(context, sugerido: interes);
                               if (pr != null) {
                                 try {
                                   await service.pagarCuota(
@@ -145,7 +142,9 @@ class CuotasDetalleSheet extends ConsumerWidget {
                                       const SnackBar(content: Text('Pago registrado')),
                                     );
                                   }
-                                  // Cerrar devolviendo true para recargar
+                                  // ⬇️ Anunciar refresh global de Préstamos
+                                  announcePrestamosRefresh(ref);
+                                  // Cerrar devolviendo true para recargar quien abrió el sheet
                                   // ignore: use_build_context_synchronously
                                   await SafeClose.pop(context, true);
                                 } catch (e) {
@@ -161,19 +160,17 @@ class CuotasDetalleSheet extends ConsumerWidget {
                           ),
                         OutlinedButton(
                           onPressed: () async {
-                            final ar = await showAbonoCapitalDialog(context);
+                            final ar = await showAbonoCapitalDialog(context, capitalMax: _f(resumen['capital_pendiente']));
                             if (ar != null) {
                               try {
-                                await service.abonarCapital(
-                                  idCuota,
-                                  ar.monto,
-                                  fecha: ar.fecha,
-                                );
+                                await service.abonarCapital(idCuota, ar.monto, fecha: ar.fecha);
                                 if (context.mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     const SnackBar(content: Text('Abono registrado')),
                                   );
                                 }
+                                // ⬇️ Anunciar refresh global de Préstamos
+                                announcePrestamosRefresh(ref);
                                 // Cerrar para recargar
                                 // ignore: use_build_context_synchronously
                                 await SafeClose.pop(context, true);
@@ -230,6 +227,5 @@ class CuotasDetalleSheet extends ConsumerWidget {
     );
   }
 
-  double _f(dynamic v) =>
-      (v is num) ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0;
+  double _f(dynamic v) => (v is num) ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0;
 }

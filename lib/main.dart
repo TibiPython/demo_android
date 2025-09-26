@@ -4,7 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import 'features/clientes/ui/clientes_page.dart';
 import 'features/prestamos/ui/prestamos_list_page.dart';
-import 'features/prestamos/ui/new_loan_page.dart';
+import 'features/prestamos/ui/loan_new_page.dart';
 import 'features/prestamos/ui/loan_detail_page_ui.dart';
 import 'features/cuotas/cuotas_list_page.dart' as cuotas;
 
@@ -23,7 +23,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
             path: '/prestamos',
             builder: (_, __) => const PrestamosListPage(),
             routes: [
-              GoRoute(path: 'nuevo', builder: (_, __) => const NewLoanPage()),
+              GoRoute(path: 'nuevo', builder: (_, __) => LoanNewPage()),
               GoRoute(
                 path: ':id',
                 builder: (_, st) => LoanDetailPageUI(id: int.tryParse(st.pathParameters['id'] ?? '0') ?? 0),

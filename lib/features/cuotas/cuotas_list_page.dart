@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import 'cuotas_service.dart';
 import 'cuotas_detalle_page.dart';
+import 'package:demo_android/features/prestamos/refresh_bus.dart';
 
 class CuotasListPage extends ConsumerStatefulWidget {
   const CuotasListPage({super.key});
@@ -30,6 +31,8 @@ class _CuotasListPageState extends ConsumerState<CuotasListPage> {
     setState(() {
       future = service.listarResumenPrestamos();
     });
+    // Avisar a la lista de préstamos que hay cambios
+    announcePrestamosRefresh(ref);
   }
 
   Color _estadoColor(String e) {
@@ -45,7 +48,13 @@ class _CuotasListPageState extends ConsumerState<CuotasListPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return WillPopScope(
+      onWillPop: () async {
+        // Anunciamos refresh al regresar a la lista de préstamos
+        announcePrestamosRefresh(ref);
+        return true;
+      },
+      child: Scaffold(
       appBar: AppBar(title: const Text('Gestor de Cuotas')),
       body: FutureBuilder<List<PrestamoResumen>>(
         future: future,
@@ -105,6 +114,7 @@ class _CuotasListPageState extends ConsumerState<CuotasListPage> {
         icon: const Icon(Icons.refresh),
         label: const Text('Actualizar'),
       ),
+    ),
     );
   }
 }

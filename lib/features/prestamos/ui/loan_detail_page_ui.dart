@@ -47,9 +47,17 @@ class _LoanDetailPageUIState extends ConsumerState<LoanDetailPageUI>
 
   Future<Map<String, dynamic>> _fetch() async {
     final api = ref.read(prestamosApiProvider);
-    final res = await api.getResumenByPrestamoId(widget.id); // usa RESUMEN
-    return Map<String, dynamic>.from(res);
+    
+final res = await api.getResumenByPrestamoId(widget.id); // usa RESUMEN
+try {
+  final est = await api.getEstadoByPrestamoId(widget.id);
+  final s = (est['estado'] ?? '').toString();
+  if (s.isNotEmpty) {
+    (res as Map)['__estadoCanonico'] = s.toUpperCase();
   }
+} catch (_) {}
+return Map<String, dynamic>.from(res);
+}
 
   Future<void> _reload() async {
     setState(() => _future = _fetch());

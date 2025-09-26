@@ -171,3 +171,43 @@ class CuotasService {
     }
   }
 }
+
+
+// ================== Adiciones mínimas: estado canónico por Cuotas (fallback) ==================
+// Estas utilidades NO reemplazan nada existente. Proveen acceso a las rutas de estado
+// en el router de cuotas para usarse como respaldo cuando el router de préstamos no esté disponible.
+// - GET /cuotas/estado/prestamo/{id}
+// - GET /cuotas/estado/resumen-prestamos?ids=1,2,3
+
+extension CuotasServiceEstadoX on CuotasService {
+  Future<Map<String, dynamic>> obtenerEstadoPrestamo(int prestamoId) async {
+    try {
+      final res = await dio.get('/cuotas/estado/prestamo/$prestamoId');
+      final body = res.data;
+      if (res.statusCode != 200 || body is! Map) {
+        throw Exception('Respuesta inesperada: ${res.statusCode} ${res.data}');
+      }
+      return Map<String, dynamic>.from(body as Map);
+    } on DioException catch (e) {
+      _throwDio(e);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> listarEstadosPrestamos(List<int> ids) async {
+    if (ids.isEmpty) return const <Map<String, dynamic>>[];
+    final idsParam = ids.join(',');
+    try {
+      final res = await dio.get('/cuotas/estado/resumen-prestamos', queryParameters: {'ids': idsParam});
+      final body = res.data;
+      if (res.statusCode != 200 || body is! List) {
+        throw Exception('Respuesta inesperada: ${res.statusCode} ${res.data}');
+      }
+      return (body as List)
+          .whereType<Map>()
+          .map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } on DioException catch (e) {
+      _throwDio(e);
+    }
+  }
+}

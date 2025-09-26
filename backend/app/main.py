@@ -1,54 +1,78 @@
-from pathlib import Path
-from dotenv import load_dotenv
+# backend/app/main.py
+# App FastAPI con CORS y manejador global de errores para devolver JSON con 'detail'
+from __future__ import annotations
 
-# Carga explícitamente backend/.env y permite sobreescribir variables existentes
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-load_dotenv(dotenv_path=ENV_PATH, override=True)
+import logging
+import traceback
+from typing import Any
 
-
-from fastapi import FastAPI
-from app.routers import debug_mail
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-# Routers
-from .routers import health
-from .routers import clientes
-from .routers import prestamos
-from app.routers import cuotas as cuotas_router  # ✅ usa una sola forma de importar cuotas
+# Importa tus routers existentes
+# (Si alguno no existe en tu árbol actual, comenta la línea correspondiente.)
+from app.routers import health
+from app.routers import clientes
+from app.routers import prestamos
+from app.routers import cuotas
+try:
+    from app.routers import debug_mail  # opcional en tu proyecto
+except Exception:
+    debug_mail = None  # type: ignore
 
-# DB
-from app.deps import get_conn  # ✅ para la conexión SQLite
+# --------------------------------------------------------------------------------------
+# Config básica de app
+# --------------------------------------------------------------------------------------
+app = FastAPI(title="Demo Android API", version="1.0.0")
 
-app = FastAPI()
-app.include_router(debug_mail.router) 
-# CORS (igual que antes)
+# CORS abierto para desarrollo; ajusta si usas dominios específicos
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],            # en producción especifica dominios
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------- Migración automática: asegurar columna 'email' en clientes ----------
-def ensure_clientes_email_column() -> None:
-    """
-    Asegura que la tabla 'clientes' tenga la columna 'email'.
-    Idempotente: si ya existe, no hace nada.
-    """
-    with get_conn() as conn:
-        cols = [r["name"] for r in conn.execute("PRAGMA table_info(clientes);").fetchall()]
-        if "email" not in cols:
-            conn.execute("ALTER TABLE clientes ADD COLUMN email TEXT;")
-            conn.commit()
+# --------------------------------------------------------------------------------------
+# Manejador GLOBAL de errores no controlados
+# (Evita 'Internal Server Error' en texto plano y expone un JSON con 'detail')
+# --------------------------------------------------------------------------------------
+logger = logging.getLogger("uvicorn.error")
 
-@app.on_event("startup")
-def _run_startup_migrations():
-    ensure_clientes_email_column()
-# -------------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Log completo en servidor (no se muestra al cliente)
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    logger.error("Unhandled exception on %s %s\n%s", request.method, request.url.path, tb)
 
-# Routers
-app.include_router(cuotas_router.router, prefix="/cuotas")                 # expone /cuotas
-app.include_router(health.router,   prefix="/health",    tags=["Health"])  # /health
-app.include_router(clientes.router, prefix="/clientes",  tags=["Clientes"])# /clientes
-app.include_router(prestamos.router, prefix="/prestamos", tags=["Prestamos"])  # /prestamos
+    # Respuesta amigable para el cliente (tu app lee 'detail')
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"Error interno: {type(exc).__name__}: {str(exc)}"
+        },
+    )
+
+# --------------------------------------------------------------------------------------
+# Rutas/routers
+# --------------------------------------------------------------------------------------
+@app.get("/")
+async def root() -> dict[str, Any]:
+    return {"status": "ok"}
+
+# Monta tus routers bajo el prefijo esperado por el front
+app.include_router(health.router, prefix="/health", tags=["health"])
+app.include_router(clientes.router, prefix="/clientes", tags=["clientes"])
+app.include_router(prestamos.router, prefix="/prestamos", tags=["prestamos"])
+app.include_router(cuotas.router, prefix="/cuotas", tags=["cuotas"])
+if debug_mail:
+    app.include_router(debug_mail.router, prefix="/debug", tags=["debug"])
+
+# --------------------------------------------------------------------------------------
+# Nota:
+# - No se toca la lógica de negocio de ningun router.
+# - Solo se añade el handler global para devolver JSON con 'detail' en 500 inesperados.
+# - Esto te permitirá ver el mensaje en la app móvil (gracias a http.dart actualizado).
+# --------------------------------------------------------------------------------------

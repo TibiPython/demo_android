@@ -10,11 +10,10 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 from typing import Any, Dict, List, Tuple
 
-from app.deps import get_conn  # usa misma conexión/ruta que el backend
+from app.deps import get_conn  # misma conexión/ruta que usa el backend
 
 log = logging.getLogger("notifications")
 if not log.handlers:
-    # Logging sencillo a consola; FastAPI/Uvicorn lo capturan igual
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
@@ -52,7 +51,7 @@ def _send_email(to: List[str], subject: str, html: str, text: str | None = None,
     sender_email = os.getenv("FROM_EMAIL", "no-reply@example.local")
     cc = [x.strip() for x in os.getenv("CC_EMAIL", "").split(",") if x.strip()]
     bcc = [x.strip() for x in os.getenv("BCC_EMAIL", "").split(",") if x.strip()]
-    recipients = list(dict.fromkeys(to + cc + bcc))  # dedup preservando orden
+    recipients = list(dict.fromkeys(to + cc + bcc))  # deduplicado preservando orden
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -86,13 +85,12 @@ def _send_email(to: List[str], subject: str, html: str, text: str | None = None,
 
 # ------------------ fetch & render ------------------
 
-def _table_has_col(conn, table: str, col: str) -> bool:
-    cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table});").fetchall()]
-    return col in cols
-
-
 def _fetch_loan_bundle(prestamo_id: int) -> Tuple[Dict[str, Any] | None, Dict[str, Any] | None, List[Dict[str, Any]]]:
+    """
+    Obtiene datos del préstamo, cliente y cuotas con tolerancia a diferencias de esquema.
+    """
     with get_conn() as conn:
+        # Cabecera préstamo/cliente
         row = conn.execute(
             """
             SELECT p.id,
@@ -125,7 +123,7 @@ def _fetch_loan_bundle(prestamo_id: int) -> Tuple[Dict[str, Any] | None, Dict[st
         }
         cliente = {
             "id": row["cliente_id"],
-            "codigo": row["cliente_codigo"],
+            "codigo": row["cliente_codigo"],   # NO lo mostraremos en el mail
             "nombre": row["cliente_nombre"],
             "email": row["cliente_email"],
         }
@@ -137,44 +135,47 @@ def _fetch_loan_bundle(prestamo_id: int) -> Tuple[Dict[str, Any] | None, Dict[st
         num_col = "cuota_numero" if "cuota_numero" in cols else ("numero" if "numero" in cols else "cuota_numero")
         fecha_col = "fecha_vencimiento" if "fecha_vencimiento" in cols else ("fecha" if "fecha" in cols else "fecha_vencimiento")
 
-        # Expresiones seguras según columnas disponibles
-        has_capital = "capital" in cols
-        has_int_a_pagar = "interes_a_pagar" in cols
-        has_interes = "interes" in cols
-        has_total = "total" in cols
+        # Capital por cuota: capital_plan > capital > 0
+        if "capital_plan" in cols:
+            cap_expr = "capital_plan AS capital"
+        elif "capital" in cols:
+            cap_expr = "capital AS capital"
+        else:
+            cap_expr = "0 AS capital"
 
-        cap_expr = "capital" if has_capital else "0 AS capital"
-        if has_int_a_pagar:
+        # Interés por cuota: interes_plan > interes_a_pagar > interes > 0
+        if "interes_plan" in cols:
+            int_expr = "interes_plan AS interes"
+        elif "interes_a_pagar" in cols:
             int_expr = "interes_a_pagar AS interes"
-        elif has_interes:
+        elif "interes" in cols:
             int_expr = "interes AS interes"
         else:
             int_expr = "0 AS interes"
 
-        if has_total:
-            total_expr = "total"
-        else:
-            # sumar de forma segura lo que haya
-            parts = []
-            if has_capital:
-                parts.append("COALESCE(capital,0)")
-            if has_int_a_pagar:
-                parts.append("COALESCE(interes_a_pagar,0)")
-            elif has_interes:
-                parts.append("COALESCE(interes,0)")
-            if parts:
-                total_expr = " + ".join(parts) + " AS total"
-            else:
-                total_expr = "0 AS total"
+        # Total por cuota: si existe 'total', úsalo; si no, lo calcularemos en Python (capital+interes).
+        total_exists = "total" in cols  # en tus dumps suele estar 'total_plan', así que calcularemos a mano
+        total_select = "total" if total_exists else "NULL AS total"
 
         sql = (
             f"SELECT {num_col} AS numero, {fecha_col} AS fecha_venc, "
-            f"{cap_expr}, {int_expr}, {total_expr} "
+            f"{cap_expr}, {int_expr}, {total_select} "
             f"FROM cuotas WHERE {fk_q}=? ORDER BY {num_col} ASC;"
         )
-
         rows_q = conn.execute(sql, (prestamo_id,)).fetchall()
-        cuotas = [dict(r) for r in rows_q]
+
+        cuotas: List[Dict[str, Any]] = []
+        for r in rows_q:
+            c = dict(r)
+            # Asegurar tipos numéricos float
+            def _f(v):
+                try: return float(v)
+                except Exception: return 0.0
+            c["capital"] = _f(c.get("capital"))
+            c["interes"] = _f(c.get("interes"))
+            # Si no hay 'total', se calculará luego (capital + interes)
+            cuotas.append(c)
+
         return cliente, prestamo, cuotas
 
 
@@ -182,38 +183,72 @@ def _render_loan_created(cliente: Dict[str, Any], prestamo: Dict[str, Any], cuot
     folio = f"P-{prestamo['id']:04d}"
     subject = f"Nuevo préstamo {folio} — {cliente.get('nombre','')}"
 
+    def _f(v):
+        try: return float(v or 0)
+        except Exception: return 0.0
+
+    # Totales
+    sum_cap = sum(_f(c.get("capital")) for c in cuotas)
+    sum_int = sum(_f(c.get("interes")) for c in cuotas)
+    sum_tot = 0.0
+    for c in cuotas:
+        t = c.get("total")
+        sum_tot += _f(t) if t is not None else (_f(c.get("capital")) + _f(c.get("interes")))
+
+    # Texto plano (ocultando código del cliente)
     text_lines = [
         f"Préstamo {folio}",
-        f"Cliente: {cliente.get('nombre','')} (código {cliente.get('codigo','—')})",
+        f"Cliente: {cliente.get('nombre','')}",
         f"Monto: {_fmt_money(prestamo.get('monto'))}",
         f"Tasa: {prestamo.get('tasa_interes')}%  Plazo: {prestamo.get('num_cuotas')}  Inicio: {prestamo.get('fecha_inicio')}",
         "",
         "Cuotas:",
     ]
     for c in cuotas:
+        total_fila = (_f(c.get("total")) if c.get("total") is not None
+                      else (_f(c.get("capital")) + _f(c.get("interes"))))
         text_lines.append(
-            f"#{c['numero']:>2}  vence {c['fecha_venc']}: "
+            f"#{int(c['numero']):>2}  vence {c['fecha_venc']}: "
             f"capital {_fmt_money(c.get('capital'))} "
             f"interés {_fmt_money(c.get('interes'))} "
-            f"total {_fmt_money(c.get('total'))}"
+            f"total {_fmt_money(total_fila)}"
         )
+    text_lines.append("")
+    text_lines.append(f"Σ Capital: {_fmt_money(sum_cap)}   Σ Interés: {_fmt_money(sum_int)}   Σ Total: {_fmt_money(sum_tot)}")
     text = "\n".join(text_lines)
 
+    # Filas HTML
     filas = "\n".join(
-        f"<tr>"
-        f"<td style='padding:4px;text-align:center'>{c['numero']}</td>"
-        f"<td style='padding:4px'>{c['fecha_venc']}</td>"
-        f"<td style='padding:4px;text-align:right'>{_fmt_money(c.get('capital'))}</td>"
-        f"<td style='padding:4px;text-align:right'>{_fmt_money(c.get('interes'))}</td>"
-        f"<td style='padding:4px;text-align:right'><b>{_fmt_money(c.get('total'))}</b></td>"
-        f"</tr>"
+        (
+            lambda total_fila:
+            f"<tr>"
+            f"<td style='padding:4px;text-align:center'>{int(c['numero'])}</td>"
+            f"<td style='padding:4px'>{c['fecha_venc']}</td>"
+            f"<td style='padding:4px;text-align:right'>{_fmt_money(c.get('capital'))}</td>"
+            f"<td style='padding:4px;text-align:right'>{_fmt_money(c.get('interes'))}</td>"
+            f"<td style='padding:4px;text-align:right'><b>{_fmt_money(total_fila)}</b></td>"
+            f"</tr>"
+        )(
+            _f(c.get("total")) if c.get("total") is not None else (_f(c.get("capital")) + _f(c.get("interes")))
+        )
         for c in cuotas
     )
 
+    # Fila de totales
+    fila_totales = (
+        "<tr style='background:#fafafa'>"
+        "<td style='padding:6px 8px;text-align:center' colspan='2'><b>Totales</b></td>"
+        f"<td style='padding:6px 8px;text-align:right'><b>{_fmt_money(sum_cap)}</b></td>"
+        f"<td style='padding:6px 8px;text-align:right'><b>{_fmt_money(sum_int)}</b></td>"
+        f"<td style='padding:6px 8px;text-align:right'><b>{_fmt_money(sum_tot)}</b></td>"
+        "</tr>"
+    )
+
+    # HTML (ocultando código, mostrando folio)
     html = f"""
     <div style="font-family:system-ui,Arial;line-height:1.35">
       <h2 style="margin:0 0 8px 0">Préstamo {folio}</h2>
-      <p style="margin:0 0 4px 0"><b>Cliente:</b> {cliente.get('nombre','')} (código {cliente.get('codigo','—')})</p>
+      <p style="margin:0 0 4px 0"><b>Cliente:</b> {cliente.get('nombre','')}</p>
       <p style="margin:0 0 12px 0">
         <b>Monto:</b> {_fmt_money(prestamo.get('monto'))} &nbsp;·&nbsp;
         <b>Tasa:</b> {prestamo.get('tasa_interes')}% &nbsp;·&nbsp;
@@ -232,6 +267,7 @@ def _render_loan_created(cliente: Dict[str, Any], prestamo: Dict[str, Any], cuot
         </thead>
         <tbody>
           {filas}
+          {fila_totales}
         </tbody>
       </table>
     </div>
@@ -242,7 +278,10 @@ def _render_loan_created(cliente: Dict[str, Any], prestamo: Dict[str, Any], cuot
 # ------------------ API pública ------------------
 
 def send_loan_created_email(prestamo_id: int) -> None:
-    # flag para activar/desactivar sin tocar código
+    """
+    Envía correo de préstamo creado al email del cliente (si existe).
+    Controlado por EMAIL_ON_LOAN_CREATED=true/false.
+    """
     if os.getenv("EMAIL_ON_LOAN_CREATED", "true").lower() not in ("1", "true", "yes", "on"):
         log.info("EMAIL_ON_LOAN_CREATED desactivado; omito envío.")
         return

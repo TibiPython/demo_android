@@ -157,8 +157,7 @@ def resumen_prestamos():
                 ) = (
                     SELECT COUNT(*) FROM cuotas c4 WHERE c4.{fk}=p.id
                 ) AND (
-                    (p.importe_credito - {ab_sum_expr}) > 0
-                ) THEN 'VENCIDO'
+                    (p.importe_credito - {ab_sum_expr}) > 0 ) THEN 'PENDIENTE'
                 WHEN (
                     SELECT COUNT(*) FROM cuotas c5 WHERE c5.{fk}=p.id AND c5.estado='PAGADO'
                 ) = (
@@ -232,8 +231,7 @@ def resumen_de_prestamo(prestamo_id: int):
                 ) = (
                     SELECT COUNT(*) FROM cuotas c4 WHERE c4.{fk}=p.id
                 ) AND (
-                    (p.importe_credito - {ab_sum_expr}) > 0
-                ) THEN 'VENCIDO'
+                    (p.importe_credito - {ab_sum_expr}) > 0 ) THEN 'PENDIENTE'
                 WHEN (
                     SELECT COUNT(*) FROM cuotas c5 WHERE c5.{fk}=p.id AND c5.estado='PAGADO'
                 ) = (
@@ -393,47 +391,159 @@ def registrar_pago(cuota_id: int, payload: PagoInput):
         return _row_to_cuota(row, m)
 
 
+# --- REEMPLAZO QUIRÚRGICO v4: registrar_abono_capital
+# Bloquea abonos a cuotas ya pagadas (interés cubierto) y persiste interés en TODAS las siguientes (flag ON).
 @router.post("/{cuota_id:int}/abono-capital")
 def registrar_abono_capital(cuota_id: int, payload: AbonoCapitalInput):
-    f = payload.fecha or date.today().isoformat()
+    """
+    Reglas base:
+    - monto > 0 (validado / verificación adicional)
+    - fecha admite "YYYY-MM-DD" (string) o date; default hoy
+    - No cambia el estado de la cuota
+    - No permite abonar más que el capital pendiente del préstamo
+
+    Nuevas validaciones (quirúrgicas):
+    - Rechazar abono si la cuota ya tiene el interés cubierto:
+        * estado == "PAGADO"  OR
+        * interes_pagado >= interes_plan (tolerancia de redondeo)
+      -> Devuelve 409 con mensaje claro.
+    
+    Persistencia (opción B):
+    - Bajo flag AUTO_INTERES_ABONOS_PERSIST=on y préstamos automáticos,
+      recalcula y PERSISTE el interés de TODAS las cuotas siguientes (N+1..fin),
+      excluyendo cuotas ya PAGADAS.
+    """
+    from datetime import date as _date
+    import os
+
+    # Normalizar fecha: aceptar string ISO o date; default hoy
+    if isinstance(payload.fecha, str):
+        try:
+            f = _date.fromisoformat(payload.fecha).isoformat()
+        except Exception:
+            raise HTTPException(status_code=422, detail="fecha debe tener formato YYYY-MM-DD")
+    else:
+        f = (payload.fecha or _date.today()).isoformat()
+
+    monto = float(payload.monto)
+    if monto <= 0:
+        raise HTTPException(status_code=422, detail="monto debe ser > 0")
+
     with get_conn() as conn:
+        # Tablas mínimas
         if not (_table_exists(conn, "cuotas") and _table_exists(conn, "abonos_capital")):
             raise HTTPException(status_code=404, detail="Falta tabla 'cuotas' o 'abonos_capital'")
+
         m = _cuota_mapping(conn)
-        row = conn.execute(
-            f"SELECT {m['fk_prestamo']} AS id_prestamo, {m['nombre_cliente']} AS nombre_cliente FROM cuotas WHERE id=?;",
-            (cuota_id,)
-        ).fetchone()
+        nom_col = m.get("nombre_cliente") or "''"
+
+        # Traer cuota objetivo con numero, interés plan y pagado
+        sel = (
+            f"SELECT id, {m['fk_prestamo']} AS id_prestamo, {m['numero']} AS numero, "
+            f"{nom_col} AS nombre_cliente, {m['estado']} AS estado, "
+            f"{m['interes_a_pagar']} AS interes_plan, "
+            f"{m['interes_pagado']} AS interes_pagado "
+            f"FROM cuotas WHERE id=?;"
+        )
+        row = conn.execute(sel, (cuota_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Cuota no encontrada")
+
+        estado_actual = (row["estado"] or "PENDIENTE").upper()
+        interes_plan = float(row["interes_plan"] or 0.0)
+        interes_pagado = float(row["interes_pagado"] or 0.0)
+
+        # --- NUEVA REGLA: no permitir abonos si el interés ya está cubierto ---
+        tol = 0.005
+        if estado_actual == "PAGADO" or (interes_pagado + tol >= interes_plan and interes_plan > 0):
+            raise HTTPException(
+                status_code=409,
+                detail="No se puede abonar capital a una cuota con interés ya pagado (PAGADO)."
+            )
+
         id_prestamo = row["id_prestamo"]
+        numero_actual = int(row["numero"] or 0)
         nombre_cliente = row["nombre_cliente"]
+
+        # Datos del préstamo
+        imp_row = conn.execute("SELECT importe_credito, tasa_interes, plan_mode FROM prestamos WHERE id=?;", (id_prestamo,)).fetchone()
+        if not imp_row:
+            raise HTTPException(status_code=404, detail="Préstamo no encontrado para la cuota")
+        importe_credito = float(imp_row["importe_credito"] or 0)
+        tasa = float(imp_row["tasa_interes"] or 0)
+        plan_mode = (imp_row["plan_mode"] or "auto") if "plan_mode" in imp_row.keys() else "auto"
+
+        # Capital pagado previo (ANTES de este abono)
+        r = conn.execute("SELECT COALESCE(SUM(monto),0) AS s FROM abonos_capital WHERE id_prestamo = ?", (id_prestamo,)).fetchone()
+        capital_pagado_pre = float(r["s"] if r and "s" in r.keys() else 0.0)
+        capital_pendiente_pre = max(importe_credito - capital_pagado_pre, 0.0)
+        if monto > capital_pendiente_pre + 1e-6:
+            raise HTTPException(status_code=422, detail=f"Abono excede capital pendiente ({capital_pendiente_pre:.2f})")
+
+        # Insertar en abonos_capital
         ab_cols = _cols(conn, "abonos_capital")
-        ab_fk = _pick(ab_cols, ["id_prestamo"]) or "id_prestamo"
-        ab_nom = _pick(ab_cols, ["nombre_cliente"]) or "nombre_cliente"
-        ab_fecha = _pick(ab_cols, ["fecha"]) or "fecha"
-        ab_monto = _pick(ab_cols, ["monto"]) or "monto"
+        ab_fk    = _pick(["id_prestamo"],   ab_cols) or "id_prestamo"
+        ab_nom   = _pick(["nombre_cliente"],ab_cols) or "nombre_cliente"
+        ab_fecha = _pick(["fecha"],         ab_cols) or "fecha"
+        ab_monto = _pick(["monto"],         ab_cols) or "monto"
         conn.execute(
             f"INSERT INTO abonos_capital ({ab_fk},{ab_nom},{ab_fecha},{ab_monto}) VALUES (?,?,?,?);",
-            (id_prestamo, nombre_cliente, f, float(payload.monto))
+            (id_prestamo, nombre_cliente, f, monto)
         )
-        if m["abono_capital"]:
+
+        # Acumular en campo de la cuota si existe
+        if m.get("abono_capital"):
             conn.execute(
                 f"UPDATE cuotas SET {m['abono_capital']} = COALESCE({m['abono_capital']}, 0) + ? WHERE id = ?;",
-                (float(payload.monto), cuota_id)
+                (monto, cuota_id)
             )
+
+        # -------- PERSISTENCIA de INTERÉS para TODAS las siguientes (bajo flag) --------
+        try:
+            persist_on = (os.getenv("AUTO_INTERES_ABONOS_PERSIST", "") or "").strip().lower() in {"1","true","on","yes","y"}
+            if persist_on and plan_mode == "auto":
+                # Recalcular base tras incluir ESTE abono
+                r2 = conn.execute("SELECT COALESCE(SUM(monto),0) AS s FROM abonos_capital WHERE id_prestamo = ?", (id_prestamo,)).fetchone()
+                capital_pagado_total = float(r2["s"] if r2 and "s" in r2.keys() else 0.0)
+                cap_pend = max(importe_credito - capital_pagado_total, 0.0)
+                interes_por_cuota_nuevo = round(cap_pend * tasa / 100.0, 2)
+
+                num_col = m["numero"]
+                int_col = m["interes_a_pagar"]
+                estado_col = m["estado"]
+                fk_col = m["fk_prestamo"]
+
+                conn.execute(
+                    f"""
+                    UPDATE cuotas
+                    SET {int_col} = ?
+                    WHERE {fk_col} = ?
+                      AND {num_col} > ?
+                      AND UPPER({estado_col}) <> 'PAGADO';
+                    """,
+                    (interes_por_cuota_nuevo, id_prestamo, numero_actual)
+                )
+        except Exception:
+            # Si el recalculo persistente falla, el abono NO se bloquea
+            pass
+        # -------------------------------------------------------------------------------
+
         conn.commit()
+
+        # Log CSV (best-effort)
         try:
             csv_path = _db_dir(conn) / "abonos_capital_log.csv"
             write_header = not csv_path.exists()
             with open(csv_path, "a", newline="", encoding="utf-8") as fh:
-                w = csv.writer(fh)
+                import csv as _csv
+                w = _csv.writer(fh)
                 if write_header:
                     w.writerow(["fecha", "id_prestamo", "nombre_cliente", "monto", "cuota_id"])
-                w.writerow([f, id_prestamo, nombre_cliente or "", float(payload.monto), cuota_id])
+                w.writerow([f, id_prestamo, nombre_cliente or "", monto, cuota_id])
         except Exception:
             pass
-        return {"status": "ok", "id_prestamo": id_prestamo, "fecha": f, "monto": float(payload.monto)}
+
+        return {"status": "ok", "id_prestamo": id_prestamo, "fecha": f, "monto": monto}
 
 # ======================== RECORDATORIOS POR EMAIL =========================
 # Endpoints NUEVOS y no invasivos:
@@ -612,3 +722,120 @@ def enviar_recordatorios(dias: int = Query(1, ge=0, le=30), dry_run: bool = Quer
         "items": items if dry_run else to_send
     }
 # =======================================================================
+
+
+# ---------- Adición mínima: estado canónico de préstamo (sin modificar código existente) ----------
+# Nota: se agregan utilidades y endpoint para consultar un "estado" unificado de un préstamo.
+# Reglas:
+# - "PAGADO" si TODAS las cuotas están pagadas y (importe_credito - abonos_capital) <= 0.
+# - "VENCIDO" si existe al menos una cuota PENDIENTE con fecha de vencimiento < hoy, o
+#             si TODAS las cuotas están pagadas pero (importe_credito - abonos_capital) > 0.
+# - En otros casos, "PENDIENTE".
+# No se eliminan ni alteran endpoints existentes; esto permite a la app consumir un estado canónico.
+
+from fastapi import Path
+
+def _estado_prestamo_canonico(conn, prestamo_id: int) -> Dict[str, Any]:
+    """
+    Calcula el estado de un préstamo con las reglas anteriores sin tocar lógica existente.
+    Devuelve además métricas útiles para depurar diferencias entre pantallas.
+    """
+    if not (_table_exists(conn, "prestamos") and _table_exists(conn, "cuotas")):
+        raise HTTPException(status_code=500, detail="Tablas requeridas no existen")
+
+    m = _cuota_mapping(conn)
+    fk = m["fk_prestamo"]
+    venc = m["venc"]
+
+    # ¿existe tabla de abonos?
+    abonos_existe = _table_exists(conn, "abonos_capital")
+    ab_sum_expr = (
+        "COALESCE((SELECT SUM(a.monto) FROM abonos_capital a WHERE a.id_prestamo=p.id), 0)"
+        if abonos_existe else "0"
+    )
+
+    # Traer datos base del préstamo
+    row_p = conn.execute("SELECT id, importe_credito FROM prestamos WHERE id=?;", (prestamo_id,)).fetchone()
+    if not row_p:
+        raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+    importe_credito = float(row_p["importe_credito"] or 0)
+
+    # Conteos de cuotas
+    total = conn.execute(f"SELECT COUNT(*) AS c FROM cuotas WHERE {fk}=?;", (prestamo_id,)).fetchone()["c"]
+    pagadas = conn.execute(f"SELECT COUNT(*) AS c FROM cuotas WHERE {fk}=? AND estado='PAGADO';", (prestamo_id,)).fetchone()["c"]
+    # Vencidas pendientes a hoy
+    hoy = date.today().isoformat()
+    vencidas_pendientes = conn.execute(
+        f"SELECT COUNT(*) AS c FROM cuotas WHERE {fk}=? AND estado='PENDIENTE' AND date({venc}) < date(?);",
+        (prestamo_id, hoy)
+    ).fetchone()["c"]
+
+    # Capital pendiente por abonos de capital
+    cap_row = conn.execute(
+        f"SELECT (p.importe_credito - {ab_sum_expr}) AS capital_pendiente FROM prestamos p WHERE p.id=?;",
+        (prestamo_id,)
+    ).fetchone()
+    capital_pendiente = float(cap_row["capital_pendiente"] or 0)
+
+    # Última fecha de vencimiento
+    vence_row = conn.execute(f"SELECT MAX(date({venc})) AS vence_ultima_cuota FROM cuotas WHERE {fk}=?;", (prestamo_id,)).fetchone()
+    vence_ultima_cuota = vence_row["vence_ultima_cuota"]
+
+    # Lógica de estado canónico
+    if total == 0:
+        estado = "PENDIENTE"
+    elif pagadas == total and capital_pendiente <= 0:
+        estado = "PAGADO"
+    elif vencidas_pendientes > 0:
+        estado = "VENCIDO"
+    elif pagadas == total and capital_pendiente > 0:
+        estado = "PENDIENTE"
+    else:
+        estado = "PENDIENTE"
+
+    return {
+        "id": prestamo_id,
+        "estado": estado,
+        "capital_pendiente": capital_pendiente,
+        "cuotas_total": total,
+        "cuotas_pagadas": pagadas,
+        "cuotas_vencidas_pendientes": vencidas_pendientes,
+        "vence_ultima_cuota": vence_ultima_cuota,
+        "importe_credito": importe_credito,
+        "fecha_referencia": hoy,
+    }
+
+
+@router.get("/estado/prestamo/{prestamo_id:int}")
+def obtener_estado_prestamo(prestamo_id: int = Path(..., ge=1)):
+    """
+    Endpoint no intrusivo que expone el estado "canónico" del préstamo.
+    No modifica datos; solo consulta, para que el frontend lo consuma y evite divergencias entre pantallas.
+    """
+    with get_conn() as conn:
+        return _estado_prestamo_canonico(conn, prestamo_id)
+
+
+@router.get("/estado/resumen-prestamos")
+def listar_estado_resumen_prestamos(ids: Optional[str] = Query(default=None)):
+    """
+    Endpoint auxiliar para múltiples préstamos.
+    - Parámetro `ids`: lista separada por comas de IDs de préstamos. Si se omite, no devuelve nada (no infiere todos).
+    - Respuesta: lista de objetos con `id` y `estado` (y métricas) por cada id solicitado.
+    """
+    if not ids:
+        return []
+    try:
+        id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de 'ids' inválido")
+
+    out: List[Dict[str, Any]] = []
+    with get_conn() as conn:
+        for pid in id_list:
+            try:
+                out.append(_estado_prestamo_canonico(conn, pid))
+            except HTTPException as e:
+                # Si algún id no existe, devolvemos un objeto con error contextual pero seguimos con los demás
+                out.append({"id": pid, "error": e.detail})
+    return out

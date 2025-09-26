@@ -1,4 +1,3 @@
-// lib/features/cuotas/cuotas_detalle_page.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -7,14 +6,14 @@ import 'cuotas_service.dart';
 import 'cuota_pago_dialog.dart';
 import 'abono_capital_dialog.dart';
 
+// Bus de refresh (no cambia comportamiento existente)
+import 'package:demo_android/features/prestamos/refresh_bus.dart';
+
 String _pf(num? v) {
   if (v == null) return '-';
   final s = NumberFormat.currency(locale: 'es_CO', symbol: '', decimalDigits: 2).format(v);
   return '\$\u00A0' + s;
 }
-
-
-
 
 class CuotasDetallePage extends ConsumerStatefulWidget {
   final int prestamoId;
@@ -43,7 +42,15 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
     final resumenJson = (raw['resumen'] as Map<String, dynamic>);
     final resumen = PrestamoResumen.fromJson(resumenJson);
     final cuotas = List<Map<String, dynamic>>.from(raw['cuotas'] as List);
-    return _DetalleData(resumen: resumen, cuotas: cuotas);
+    
+String? estadoCanonico;
+try {
+  final est = await service.obtenerEstadoPrestamo(widget.prestamoId);
+  final e = (est['estado'] ?? '').toString();
+  if (e.isNotEmpty) estadoCanonico = e.toUpperCase();
+} catch (_) {}
+return _DetalleData(resumen: resumen, cuotas: cuotas, estadoCanonico: estadoCanonico);
+
   }
 
   void _reload() {
@@ -61,6 +68,39 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
       default:
         return Colors.orange;
     }
+  }
+
+  /// Deriva la fecha "Vence" para el header: prefiere la del resumen si es válida;
+  /// si no, toma el máximo de las fechas de vencimiento de las cuotas.
+  DateTime? _deriveVenceHeader(PrestamoResumen r, List<Map<String, dynamic>> cuotas) {
+    DateTime? vence = r.venceUltimaCuota;
+    // Si el resumen viene vacío o inconsistente, mirar cuotas:
+    for (final c in cuotas) {
+      final v = c['fecha_vencimiento']?.toString();
+      if (v == null || v.isEmpty) continue;
+      final d = DateTime.tryParse(v);
+      if (d != null && (vence == null || d.isAfter(vence))) {
+        vence = d;
+      }
+    }
+    return vence;
+  }
+
+  /// Deriva el estado del header a partir de las cuotas:
+  /// - Si alguna está VENCIDO -> VENCIDO
+  /// - Si todas están PAGADO (y hay al menos una) -> PAGADO
+  /// - En otro caso -> PENDIENTE
+  String _deriveEstadoHeader(PrestamoResumen r, List<Map<String, dynamic>> cuotas) {
+    bool anyVencido = false;
+    bool allPagado = cuotas.isNotEmpty;
+    for (final c in cuotas) {
+      final e = (c['estado'] ?? '').toString().toUpperCase();
+      if (e == 'VENCIDO') anyVencido = true;
+      if (e != 'PAGADO') allPagado = false;
+    }
+    if (anyVencido) return 'VENCIDO';
+    if (allPagado) return 'PAGADO';
+    return 'PENDIENTE';
   }
 
   @override
@@ -84,6 +124,11 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
 
           final data = snap.data!;
           final r = data.resumen;
+          final cuotas = data.cuotas;
+
+          // ⬇️ Nuevas derivaciones seguras (solo UI)
+          final venceHeader = _deriveVenceHeader(r, cuotas);
+          final estadoHeader = data.estadoCanonico ?? _deriveEstadoHeader(r, cuotas);
 
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
@@ -94,66 +139,41 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
                 margin: const EdgeInsets.symmetric(vertical: 6),
                 child: Stack(
                   children: [
-                    // Reservamos espacio a la derecha para que el chip no se superponga
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 12, 128, 12),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            r.nombreCliente ?? '',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
+                          Text(r.nombreCliente ?? '',
+                              style: Theme.of(context).textTheme.titleMedium),
                           const SizedBox(height: 8),
                           Wrap(
                             spacing: 16,
                             runSpacing: 8,
                             children: [
                               _kv(context, 'Modalidad', r.modalidad ?? '-'),
-                              _kv(
-                                context,
-                                'Vence',
-                                r.venceUltimaCuota == null
-                                    ? '-'
-                                    : fmtDate.format(r.venceUltimaCuota!),
-                              ),
-                              _kv(
-                                context,
-                                'Crédito',
-                                r.importeCredito == null
-                                    ? '-'
-                                    : _pf(r.importeCredito),
-                              ),
-                              _kv(
-                                context,
-                                'Tasa %',
-                                r.tasaInteres?.toStringAsFixed(2) ?? '-',
-                              ),
-                              _kv(context, 'Interés total',
-                                  _pf(r.totalInteresAPagar)),
-                              _kv(context, 'Abonos capital',
-                                  _pf(r.totalAbonosCapital)),
-                              _kv(context, 'Capital pendiente',
-                                  _pf(r.capitalPendiente)),
+                              _kv(context, 'Vence', venceHeader == null ? '-' : fmtDate.format(venceHeader)),
+                              _kv(context, 'Crédito',
+                                  r.importeCredito == null ? '-' : _pf(r.importeCredito)),
+                              _kv(context, 'Tasa %',
+                                  r.tasaInteres?.toStringAsFixed(2) ?? '-'),
+                              _kv(context, 'Interés total', _pf(r.totalInteresAPagar)),
+                              _kv(context, 'Abonos capital', _pf(r.totalAbonosCapital)),
+                              _kv(context, 'Capital pendiente', _pf(r.capitalPendiente)),
                             ],
                           ),
                         ],
                       ),
                     ),
-                    // Chip ESTADO arriba-derecha
                     Positioned(
                       right: 8,
                       top: 8,
                       child: Chip(
-                        label: Text(r.estado),
-                        labelPadding:
-                            const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 2, vertical: 0),
-                        backgroundColor: _estadoColor(r.estado).withOpacity(0.15),
-                        side: BorderSide(
-                          color: _estadoColor(r.estado).withOpacity(0.25),
-                        ),
+                        label: Text(estadoHeader),
+                        labelPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 0),
+                        backgroundColor: _estadoColor(estadoHeader).withOpacity(0.15),
+                        side: BorderSide(color: _estadoColor(estadoHeader).withOpacity(0.25)),
                       ),
                     ),
                   ],
@@ -162,37 +182,30 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
               const SizedBox(height: 8),
 
               // ----- Tarjetas de Cuotas -----
-              ...data.cuotas.map((q) => _CuotaCard(
+              ...cuotas.map((q) => _CuotaCard(
                     q: q,
                     fmtDate: fmtDate,
                     fmtMoney: fmtMoney,
                     estadoColor: _estadoColor,
                     onPagar: (double interes, DateTime? fecha) async {
-                      await service.pagarCuota(
-                        q['id'] as int,
-                        interesPagado: interes,
-                        fechaPago: fecha,
-                      );
+                      await service.pagarCuota(q['id'] as int, interesPagado: interes, fechaPago: fecha);
                       if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Pago registrado')),
-                        );
+                        ScaffoldMessenger.of(context)
+                            .showSnackBar(const SnackBar(content: Text('Pago registrado')));
+                        announcePrestamosRefresh(ref);
                         _reload();
                       }
                     },
                     onAbono: (double monto, DateTime? fecha) async {
-                      await service.abonarCapital(
-                        q['id'] as int,
-                        monto,
-                        fecha: fecha,
-                      );
+                      await service.abonarCapital(q['id'] as int, monto, fecha: fecha);
                       if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Abono registrado')),
-                        );
+                        ScaffoldMessenger.of(context)
+                            .showSnackBar(const SnackBar(content: Text('Abono registrado')));
+                        announcePrestamosRefresh(ref);
                         _reload();
                       }
                     },
+                    capitalMax: r.capitalPendiente,
                   )),
             ],
           );
@@ -201,18 +214,13 @@ class _CuotasDetallePageState extends ConsumerState<CuotasDetallePage> {
     );
   }
 
-  /// Par "clave: valor" que **puede partirse en varias líneas** si no cabe,
-  /// para evitar desbordes (overflow) sin cambiar estilo ni colores.
   Widget _kv(BuildContext context, String k, String v) {
     final baseStyle = Theme.of(context).textTheme.bodyMedium!;
     return RichText(
       text: TextSpan(
         style: baseStyle,
         children: [
-          TextSpan(
-            text: '$k: ',
-            style: baseStyle.copyWith(fontWeight: FontWeight.w600),
-          ),
+          TextSpan(text: '$k: ', style: baseStyle.copyWith(fontWeight: FontWeight.w600)),
           TextSpan(text: v),
         ],
       ),
@@ -228,6 +236,7 @@ class _CuotaCard extends StatelessWidget {
   final Color Function(String) estadoColor;
   final Future<void> Function(double interes, DateTime? fecha) onPagar;
   final Future<void> Function(double monto, DateTime? fecha) onAbono;
+  final double? capitalMax;
 
   const _CuotaCard({
     super.key,
@@ -237,6 +246,7 @@ class _CuotaCard extends StatelessWidget {
     required this.estadoColor,
     required this.onPagar,
     required this.onAbono,
+    this.capitalMax,
   });
 
   @override
@@ -270,38 +280,29 @@ class _CuotaCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Encabezado
             Row(
               children: [
                 CircleAvatar(child: Text(numTxt)),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Text(
-                    'Cuota $numTxt  ·  $modTxt',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
+                  child: Text('Cuota $numTxt  ·  $modTxt',
+                      style: Theme.of(context).textTheme.titleSmall),
                 ),
-                // Estado en chip a la derecha
                 Chip(
                   label: Text(estado),
-                  labelPadding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                  labelPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
                   backgroundColor: estadoColor(estado).withOpacity(0.15),
-                  side:
-                      BorderSide(color: estadoColor(estado).withOpacity(0.25)),
+                  side: BorderSide(color: estadoColor(estado).withOpacity(0.25)),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-
-            // Dos columnas: Vence / Mora (días)
             Row(
               children: [
                 Expanded(child: Text('Vence: ${_fmt(q['fecha_vencimiento'])}')),
                 Expanded(child: Text('Mora (días): ${moraTxt.isEmpty ? "0" : moraTxt}')),
               ],
             ),
-            // Fecha de pago (si existe), debajo de Vence
             if (_s(q['fecha_pago']).isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -311,8 +312,6 @@ class _CuotaCard extends StatelessWidget {
                 ),
               ),
             const SizedBox(height: 8),
-
-            // Dos columnas: Interés a pagar / Interés pagado
             Row(
               children: [
                 Expanded(child: Text('Interés a pagar: ${_pf(interesAPagar)}')),
@@ -320,8 +319,6 @@ class _CuotaCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-
-            // Dos columnas: Abono capital / ID cuota
             Row(
               children: [
                 Expanded(child: Text('Abono capital: ${_pf(abonoCapital)}')),
@@ -329,8 +326,6 @@ class _CuotaCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 16),
-
-            // Acciones (con icono cerdito en Abono)
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
@@ -338,20 +333,16 @@ class _CuotaCard extends StatelessWidget {
                   ElevatedButton(
                     onPressed: () async {
                       final sugerido = (interesAPagar as num).toDouble();
-                      final result =
-                          await showPagoCuotaDialog(context, sugerido: sugerido);
-                      if (result == null) return;
-                      await onPagar(result.interesPagado, result.fechaPago);
+                      final pr = await showPagoCuotaDialog(context, sugerido: sugerido);
+                      if (pr != null) await onPagar(pr.interesPagado, pr.fechaPago);
                     },
                     child: const Text('Pagar interés'),
                   ),
                 const SizedBox(width: 12),
                 OutlinedButton.icon(
                   onPressed: () async {
-                    final result = await showAbonoCapitalDialog(context);
-                    if (result == null) return;
-                    await onAbono(
-                        (result.monto as num).toDouble(), result.fecha);
+                    final ar = await showAbonoCapitalDialog(context, capitalMax: capitalMax);
+                    if (ar != null) await onAbono((ar.monto as num).toDouble(), ar.fecha);
                   },
                   icon: const Icon(Icons.savings_outlined),
                   label: const Text('Abono'),
@@ -365,8 +356,11 @@ class _CuotaCard extends StatelessWidget {
   }
 }
 
+
 class _DetalleData {
   final PrestamoResumen resumen;
   final List<Map<String, dynamic>> cuotas;
-  _DetalleData({required this.resumen, required this.cuotas});
+  final String? estadoCanonico;
+  _DetalleData({required this.resumen, required this.cuotas, this.estadoCanonico});
 }
+

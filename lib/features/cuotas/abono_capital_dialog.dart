@@ -8,7 +8,7 @@ class AbonoCapitalResult {
   AbonoCapitalResult(this.monto, this.fecha);
 }
 
-Future<AbonoCapitalResult?> showAbonoCapitalDialog(BuildContext context) async {
+Future<AbonoCapitalResult?> showAbonoCapitalDialog(BuildContext context, {double? capitalMax}) async {
   final formKey = GlobalKey<FormState>();
   final montoCtrl = TextEditingController();
   DateTime? fecha;
@@ -36,6 +36,7 @@ Future<AbonoCapitalResult?> showAbonoCapitalDialog(BuildContext context) async {
                   final n = num.tryParse(s);
                   if (n == null) return 'Número inválido';
                   if (n <= 0) return 'Debe ser > 0';
+                  if (capitalMax != null && n > capitalMax) return 'Excede capital pendiente (máx: ' + capitalMax!.toStringAsFixed(2) + ')';
                   return null;
                 },
               ),
