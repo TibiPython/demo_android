@@ -324,7 +324,16 @@ def obtener_cuota(cuota_id: int):
         return _row_to_cuota(row, m)
 
 
-@router.post("/{cuota_id:int}/pago")
+@router.post(
+    "/{cuota_id:int}/pago",
+    summary="Registrar pago de interés",
+    description=(
+        "Registra el **pago del interés** de la **próxima cuota** (orden secuencial). "
+        "La cuota cambia a **PAGADO** solo si `interes_pagado` cubre **todo el interés** planificado "
+        "(con una tolerancia mínima de redondeo). "
+        "No marca capital; para reducir el interés de futuras cuotas usa abonos a capital."
+    ),
+)
 def registrar_pago(cuota_id: int, payload: PagoInput):
     fp = payload.fecha_pago or date.today().isoformat()
     with get_conn() as conn:
@@ -390,10 +399,18 @@ def registrar_pago(cuota_id: int, payload: PagoInput):
         row = conn.execute("SELECT * FROM cuotas WHERE id=?;", (cuota_id,)).fetchone()
         return _row_to_cuota(row, m)
 
-
-# --- REEMPLAZO QUIRÚRGICO v4: registrar_abono_capital
-# Bloquea abonos a cuotas ya pagadas (interés cubierto) y persiste interés en TODAS las siguientes (flag ON).
-@router.post("/{cuota_id:int}/abono-capital")
+@router.post(
+    "/{cuota_id:int}/abono-capital",
+    summary="Registrar abono a capital",
+    description=(
+        "Registra un **abono a capital** en la cuota indicada. **No** cambia el estado de la cuota. "
+        "Si la variable `AUTO_INTERES_ABONOS_PERSIST=on` está activa **y** el préstamo es **automático**, "
+        "se **recalcula y persiste** el **interés** de **todas** las cuotas **siguientes** (N+1..fin), "
+        "excluyendo cuotas ya **PAGADO**. "
+        "Reglas: no permite abonar a cuotas con **interés ya pagado** ni superar el **capital pendiente** del préstamo; "
+        "la `fecha` debe ser ISO `YYYY-MM-DD` o se toma la fecha actual."
+    ),
+)
 def registrar_abono_capital(cuota_id: int, payload: AbonoCapitalInput):
     """
     Reglas base:

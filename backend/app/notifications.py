@@ -180,100 +180,52 @@ def _fetch_loan_bundle(prestamo_id: int) -> Tuple[Dict[str, Any] | None, Dict[st
 
 
 def _render_loan_created(cliente: Dict[str, Any], prestamo: Dict[str, Any], cuotas: List[Dict[str, Any]]) -> Tuple[str, str, str]:
+    """
+    Genera el correo de préstamo creado en texto plano, sin tabla,
+    siguiendo la nueva especificación: 5 puntos de información.
+    """
     folio = f"P-{prestamo['id']:04d}"
     subject = f"Nuevo préstamo {folio} — {cliente.get('nombre','')}"
 
-    def _f(v):
-        try: return float(v or 0)
-        except Exception: return 0.0
+    # 1. Mensaje fijo
+    lineas = ["El interés de cada cuota se calcula en base al abono mensual a capital.", ""]
 
-    # Totales
-    sum_cap = sum(_f(c.get("capital")) for c in cuotas)
-    sum_int = sum(_f(c.get("interes")) for c in cuotas)
-    sum_tot = 0.0
-    for c in cuotas:
-        t = c.get("total")
-        sum_tot += _f(t) if t is not None else (_f(c.get("capital")) + _f(c.get("interes")))
+    # 2. Nombre del cliente
+    lineas.append(f"Nombre: {cliente.get('nombre','')}")
 
-    # Texto plano (ocultando código del cliente)
-    text_lines = [
-        f"Préstamo {folio}",
-        f"Cliente: {cliente.get('nombre','')}",
-        f"Monto: {_fmt_money(prestamo.get('monto'))}",
-        f"Tasa: {prestamo.get('tasa_interes')}%  Plazo: {prestamo.get('num_cuotas')}  Inicio: {prestamo.get('fecha_inicio')}",
-        "",
-        "Cuotas:",
-    ]
-    for c in cuotas:
-        total_fila = (_f(c.get("total")) if c.get("total") is not None
-                      else (_f(c.get("capital")) + _f(c.get("interes"))))
-        text_lines.append(
-            f"#{int(c['numero']):>2}  vence {c['fecha_venc']}: "
-            f"capital {_fmt_money(c.get('capital'))} "
-            f"interés {_fmt_money(c.get('interes'))} "
-            f"total {_fmt_money(total_fila)}"
-        )
-    text_lines.append("")
-    text_lines.append(f"Σ Capital: {_fmt_money(sum_cap)}   Σ Interés: {_fmt_money(sum_int)}   Σ Total: {_fmt_money(sum_tot)}")
-    text = "\n".join(text_lines)
+    # 3. Monto y Tasa %
+    monto = float(prestamo.get("monto") or 0)
+    tasa = prestamo.get("tasa_interes")
+    lineas.append(f"Monto: {monto:,.2f}  |  Tasa: {tasa}%")
 
-    # Filas HTML
-    filas = "\n".join(
-        (
-            lambda total_fila:
-            f"<tr>"
-            f"<td style='padding:4px;text-align:center'>{int(c['numero'])}</td>"
-            f"<td style='padding:4px'>{c['fecha_venc']}</td>"
-            f"<td style='padding:4px;text-align:right'>{_fmt_money(c.get('capital'))}</td>"
-            f"<td style='padding:4px;text-align:right'>{_fmt_money(c.get('interes'))}</td>"
-            f"<td style='padding:4px;text-align:right'><b>{_fmt_money(total_fila)}</b></td>"
-            f"</tr>"
-        )(
-            _f(c.get("total")) if c.get("total") is not None else (_f(c.get("capital")) + _f(c.get("interes")))
-        )
-        for c in cuotas
+    # 4. Plazo y Modalidad
+    lineas.append(
+        f"Plazo: {prestamo.get('num_cuotas')} cuota(s)  |  Modalidad: {prestamo.get('modalidad')}"
     )
 
-    # Fila de totales
-    fila_totales = (
-        "<tr style='background:#fafafa'>"
-        "<td style='padding:6px 8px;text-align:center' colspan='2'><b>Totales</b></td>"
-        f"<td style='padding:6px 8px;text-align:right'><b>{_fmt_money(sum_cap)}</b></td>"
-        f"<td style='padding:6px 8px;text-align:right'><b>{_fmt_money(sum_int)}</b></td>"
-        f"<td style='padding:6px 8px;text-align:right'><b>{_fmt_money(sum_tot)}</b></td>"
-        "</tr>"
-    )
+    # 5. Fechas de cuotas (sin montos)
+    lineas.append("Fechas de cuotas:")
+    for c in cuotas:
+        lineas.append(f"  - {c['fecha_venc']}")
 
-    # HTML (ocultando código, mostrando folio)
-    html = f"""
-    <div style="font-family:system-ui,Arial;line-height:1.35">
-      <h2 style="margin:0 0 8px 0">Préstamo {folio}</h2>
-      <p style="margin:0 0 4px 0"><b>Cliente:</b> {cliente.get('nombre','')}</p>
-      <p style="margin:0 0 12px 0">
-        <b>Monto:</b> {_fmt_money(prestamo.get('monto'))} &nbsp;·&nbsp;
-        <b>Tasa:</b> {prestamo.get('tasa_interes')}% &nbsp;·&nbsp;
-        <b>Plazo:</b> {prestamo.get('num_cuotas')} &nbsp;·&nbsp;
-        <b>Inicio:</b> {prestamo.get('fecha_inicio')}
-      </p>
-      <table border="1" cellspacing="0" cellpadding="0" style="border-collapse:collapse">
-        <thead style="background:#f5f5f5">
-          <tr>
-            <th style='padding:6px 8px'>#</th>
-            <th style='padding:6px 8px'>Vence</th>
-            <th style='padding:6px 8px'>Capital</th>
-            <th style='padding:6px 8px'>Interés</th>
-            <th style='padding:6px 8px'>Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filas}
-          {fila_totales}
-        </tbody>
-      </table>
-    </div>
-    """
+    # 6. % Interés 1era cuota (sobre capital total)
+    if cuotas:
+        try:
+            capital_total = float(prestamo.get("monto") or 0)
+            tasa_num = float(prestamo.get("tasa_interes") or 0)
+            interes_primera = capital_total * tasa_num / 100
+        except Exception:
+            interes_primera = 0.0
+        lineas.append(
+            f"Interés a pagar, primera cuota: {interes_primera:,.2f}"
+        )
+
+    text = "\n".join(lineas)
+
+    # Para compatibilidad, usamos el mismo texto como HTML sencillo
+    html = "<pre style='font-family:system-ui,Arial;line-height:1.4'>" + text + "</pre>"
+
     return subject, html, text
-
 
 # ------------------ API pública ------------------
 
